@@ -99,32 +99,46 @@ def test_gdn_decode(M, L, a):
     assert torch.equal(s0["ring"], s1["ring"])
 
 
+@pytest.mark.parametrize("fmt,rotate", [("bf16", False), ("fp8", True), ("k8v4", True), ("fp4", True), ("fp4", False)])
 @pytest.mark.parametrize("M", [1, 4, 8])
 @pytest.mark.parametrize("L", [0, 5, 300, 2000])
-def test_attention(M, L):
+def test_attention(M, L, fmt, rotate):
+    from cckernel import kvq
+
     H, Hkv, D, max_len, NS = 16, 4, 256, 4096, 32
+    kf, vf = kvq.KV_FORMATS[fmt]
     g = torch.Generator(device=dev).manual_seed(L + M)
     proj = (torch.randn(8, H * 2 * D + 2 * Hkv * D, generator=g, device=dev)).to(torch.bfloat16)
     qn = 1 + 0.1 * torch.randn(D, generator=g, device=dev)
     kn = 1 + 0.1 * torch.randn(D, generator=g, device=dev)
     inv = 1.0 / (1e7 ** (torch.arange(0, 64, 2, device=dev).float() / 64))
-    kc = (torch.randn(Hkv, max_len, D, generator=g, device=dev)).to(torch.bfloat16)
-    vc = (torch.randn(Hkv, max_len, D, generator=g, device=dev)).to(torch.bfloat16)
+    signs = kvq.kv_signs().to(dev)
+    # a random pre-existing cache in the target format
+    kd, ks = kvq.encode(kf, torch.randn(Hkv, max_len, D, generator=g, device=dev))
+    vd, vs = kvq.encode(vf, torch.randn(Hkv, max_len, D, generator=g, device=dev))
+    empty = torch.empty(0, dtype=torch.uint8, device=dev)
+    ks, vs = (ks if ks is not None else empty), (vs if vs is not None else empty)
     cur = torch.tensor([L], dtype=torch.int32, device=dev)
     outs = []
     for mod in (C_, emu):
         q = torch.zeros(8, H, D, device=dev)
-        k2, v2 = kc.clone(), vc.clone()
+        k2, k2s, v2, v2s = kd.clone(), ks.clone(), vd.clone(), vs.clone()
         out = torch.zeros(8, H * D, dtype=torch.bfloat16, device=dev)
         pa = torch.zeros(8, NS, H, D, device=dev)
         pm = torch.zeros(8, NS, H, 2, device=dev)
         cnt = torch.zeros(8, Hkv, dtype=torch.int32, device=dev)
-        mod.attn_prep(proj, qn, kn, inv, q, k2, v2, cur, M, H, Hkv, 1e-6)
-        mod.attn_decode(q, k2, v2, proj, pa, pm, cnt, out, cur, M, H, Hkv, NS)
+        mod.attn_prep(proj, qn, kn, inv, q, k2, k2s, v2, v2s, signs, cur, M, H, Hkv, 1e-6, kf, vf, rotate)
+        mod.attn_decode(q, k2, k2s, v2, v2s, signs, proj, pa, pm, cnt, out, cur, M, H, Hkv, NS, kf, vf, rotate)
         torch.cuda.synchronize()
-        outs.append((q, k2, v2, out, cnt))
-    (q0, k0, v0, o0, c0), (q1, k1, v1, o1, _) = outs
+        outs.append((q, k2, k2s, v2, v2s, out, cnt))
+    (q0, k0, ks0, v0, vs0, o0, c0), (q1, k1, ks1, v1, vs1, o1, _) = outs
     assert _rel(q0[:M], q1[:M]) < 1e-2
-    assert _rel(k0, k1) < 1e-2 and torch.equal(v0, v1)
+    new = slice(L, L + M)
+    for f, a0, s0, a1, s1 in ((kf, k0, ks0, k1, ks1), (vf, v0, vs0, v1, vs1)):
+        x0 = kvq.decode(f, a0[:, new], s0[:, new] if f == kvq.FP4 else None)
+        x1 = kvq.decode(f, a1[:, new], s1[:, new] if f == kvq.FP4 else None)
+        assert _rel(x0, x1) < 2e-2  # same cache values (bf16 rounding points may flip a few codes)
+        if f != kvq.BF16:  # the bytes themselves: the kernel mirrors kvq's rounding exactly
+            assert float((a0[:, new] == a1[:, new]).float().mean()) > 0.99
     assert _rel(o0[:M], o1[:M]) < 2e-2
     assert int(c0.abs().sum()) == 0  # tickets re-armed

@@ -176,7 +176,96 @@ The verify pass for M ≤ 8 tokens uses:
 The literature points to these next steps:
 - **Tensor-core chunked GDN prefill.** Prefill currently uses cuBLAS batched `trsm` plus matmuls.
 - **Fused dequant-GEMM for prefill.** Prefill currently dequantizes each matrix once per prompt (layer-major), then uses cuBLAS.
-- **FP8-E4M3 KV cache with calibrated scales.** 2609.04098 reports this as performance-free.
 - **Tree drafts via the tree WY solve** (TreeWY).
 - **An MTP draft head with an FR-Spec vocabulary subset.** FR-Spec is arXiv 2502.14856.
 - **Sub-4-bit QTIP trellis codes.**
+
+## 9. Quantized KV cache (DeepSeek-V4.1-Flash)
+
+*DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression*, arXiv 2609.19969, sec. 2.4.4.
+
+**What the paper does.** It stores its main KV cache as FP4:
+- E2M1 values with one E4M3 scale per 16 channels, which is NVFP4 without the second-level scale;
+- K is quantized after RoPE and dequantized in the attention kernel before use;
+- quantization-aware training makes it accurate.
+
+**What we can transfer.** Only the format carries over, because we cannot retrain. Our 8 attention layers cost 32 KiB of bf16 KV per context token:
+
+| Format | Bytes per token | Size vs bf16 |
+|---|---|---|
+| fp8 | 16 KiB | ½ |
+| k8v4 (K fp8, V fp4) | 12.5 KiB | 0.39 |
+| fp4 | 9 KiB | 0.28 |
+
+At 262,144 tokens, the model's full context, the fp4 cache takes 2.4 GB, where bf16 takes 8.6 GB. So the full context fits a 16 GB card next to the 9.4 GB of weights.
+
+**Replacing QAT with an MSE scale search.** For a group x ∈ R¹⁶:
+- the absmax scale s₀ = E4M3(max|x|/6) is not MSE-optimal on the non-uniform E2M1 grid {0, ½, 1, 1½, 2, 3, 4, 6};
+- we try the E4M3 codes s₀−2 … s₀+1 and keep the smallest ‖x − s·E2M1(x/s)‖²;
+- on Gaussian data this lowers the error below absmax scaling, to about 0.74% relative MSE (`test_fp4_scale_search_beats_absmax_and_error_level`).
+
+**Rotation.** An optional randomized Hadamard rotation Q = H diag(s)/16 is applied per head:
+- q and k are rotated after RoPE, which is exact because qᵀk = (Qq)ᵀ(Qk);
+- v is rotated too, and the output is un-rotated before the gate: o = Σ p_i v_i = Qᵀ Σ p_i (Q v_i);
+- the un-rotation comes before the gate because the sigmoid output gate is elementwise and does not commute with Q.
+
+With 16-channel groups plus the MSE search, plain fp4 already handles synthetic outlier channels well: outliers only affect their own group. So whether the rotation helps is measured on the real model (`tools/eval_quality.py`, variants `fp4` and `fp4-norot`).
+
+**Kernels (`csrc/attn.cu`):**
+- `attn_prep` runs the shared-memory FWHT (the same butterfly order as `hadamard.fwht`, so bit-identical), group absmax over a half-warp, the fp64 error comparison and the nibble pack.
+- `attn_decode` dequantizes the 8 channels of a lane in registers. For FP4 that is 4 bytes of nibbles plus 1 scale byte per row. E2M1 is decoded through a `byte_perm` lookup of the fp16 high bytes. The last CTA un-rotates the combined output with an in-place shared-memory FWHT.
+- Every rounding step is IEEE-exact (`__fdiv_rn`, `__frcp_rn`, `__fmul_rn`) despite `--use_fast_math`, so the cache bytes match `cckernel/kvq.py`.
+
+**Prefill.** It quantizes into the cache first, then attends over the dequantized cache. Prefill, decode and verify therefore read identical values, and speculative verification stays exact (`test_fp4_speculative_verify_equals_greedy`).
+
+**What is deliberately not quantized.** The 24 GDN states (48 MiB fp32) are the analogue of the paper's local SWA state, which it keeps at higher precision because it is "sensitive to quantization". They are read and written every token and are small next to the weights, so they stay fp32.
+
+## 10. Confidence-scheduled verification (DSpark)
+
+*DSpark: Confidence-Scheduled Speculative Decoding*, arXiv 2607.05147 (Alg. 1), as used by DeepSeek-V4.1-Flash.
+
+**The objective.** A verify step of M = 1 + ℓ tokens costs T(M, ctx). It emits 1 + Σ_{j≤ℓ} a_j tokens in expectation, where:
+- a_j = Π_{i≤j} c_i is the prefix-survival probability;
+- c_i is the probability that draft token i is accepted, given tokens < i were.
+
+The scheduler picks ℓ* = argmax (1 + Σ_{j≤ℓ} a_j) / T(1+ℓ, ctx).
+
+**The step-cost curve T.**
+- It is profiled by `Engine.profile_costs` as a + b·M + c·M·ctx.
+- The c term exists because `attn_decode` reads the KV cache once per verified token. A smaller KV format therefore also makes verification cheaper at long context.
+- Without a profile, the scheduler uses the 4060 Ti bandwidth model `StepCost.roofline`.
+
+**Confidence without a trained head.**
+- DSpark trains a confidence head and calibrates it with sequential temperature scaling. Our drafts come from n-gram lookup, so c_j is estimated online instead.
+- It uses Beta-smoothed counts in a back-off hierarchy of buckets: (regime, match order, agreeing earlier occurrences, position) → … → position → global.
+- Counts are censored after the first rejection.
+- Empirical frequencies are calibrated by construction; the ECE is reported per run.
+
+**Exactness.** DSpark must stop admission early because its draft tokens are sampled, so a later confidence depends on an earlier sample. An n-gram draft and the confidence state are deterministic functions of the history. Any length rule computed from them before verification therefore leaves the output distribution unchanged, so the global argmax is allowed. `test_scheduled_sampling_is_exact` checks this: TV distance to the exact sequence distribution under temperature 1.
+
+**Exact replay.** Under greedy decoding the output does not depend on the policy. `spec.replay` therefore derives, from one recorded output, the exact steps and verified drafts of every policy under any cost curve. It shares the same `SpecPolicy` code, and `test_replay_matches_policy_decisions` checks it.
+
+## 11. Persistent prefix cache
+
+This follows DeepSeek-V4.1-Flash sec. 3.2.1. The paper keeps its global KV for prefix reuse and snapshots the local state only at the end of the prompt and the end of the output; those are the points that regeneration and multi-turn requests hit.
+
+Our hybrid has the same split:
+- **Attention layers:** an append-only KV cache, stored in the engine's KV format, so fp4 snapshots are 3.6× smaller.
+- **GDN layers:** a fixed 48 MiB recurrent state that can be snapshotted but not truncated.
+
+**Implementation.**
+- `Engine.session_state()` / `load_session_state()` save and restore the KV prefix, S, the conv ring and the deferred-commit buffers. Restore is done in place, so CUDA graphs stay valid.
+- `PrefixCache` restores the longest snapshot whose tokens are a prefix of the request and prefills only the rest.
+- An exact hit needs no prefill at all, because the snapshot stores the last-token logits.
+
+## 12. CPU backend
+
+`cckernel/cpu.py` runs the real 9B model on an AVX-512/AMX CPU, so every test and measurement in this repository could run without a GPU.
+
+**Decode linears.** INT8 weights are kept group-major, int8 [K/128, N, 128]. The engine calls `aten._weight_int8pack_mm` on each 128-wide group with unit scales. The fp16 group scales are applied in fp32 as the groups are accumulated.
+
+**Consequence for speculative decoding.** Every row is computed independently in a fixed order, so the logits of a verified token do not depend on M, bit for bit. Greedy speculative decoding therefore reproduces plain decoding exactly on the real model.
+
+**Prefill.** Matrices are dequantized to bf16 and multiplied with AMX GEMMs. Short prompts go through the int8 decode path instead.
+
+**Attention.** An fp32 mirror of the dequantized KV cache is kept incrementally, so a decode step does not re-decode the whole cache.

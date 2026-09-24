@@ -77,24 +77,55 @@ void gdn_decode(torch::Tensor proj, torch::Tensor ring, torch::Tensor conv_w, to
   cck::gdn_decode(a, stream());
 }
 
+void check_kv(const torch::Tensor& data, const torch::Tensor& scale, int64_t fmt, const char* what) {
+  CHECK_CUDA(data);
+  CHECK_CONTIG(data);
+  TORCH_CHECK(fmt >= 0 && fmt <= 2, what, ": unknown KV format");
+  const int64_t d = data.size(-1) * (fmt == cck::KV_FP4 ? 2 : 1);
+  TORCH_CHECK(d == 256, what, ": attention kernels are compiled for head_dim 256");
+  TORCH_CHECK(data.scalar_type() == (fmt == cck::KV_BF16 ? torch::kBFloat16 : torch::kByte), what, ": dtype");
+  if (fmt == cck::KV_FP4) {
+    CHECK_CUDA(scale);
+    CHECK_CONTIG(scale);
+    TORCH_CHECK(scale.size(-1) == 16 && scale.size(1) == data.size(1), what, ": FP4 scale shape");
+  }
+}
+
+void check_formats(int64_t kfmt, int64_t vfmt) {
+  TORCH_CHECK((kfmt == 0 && vfmt == 0) || (kfmt == 1 && vfmt == 1) || (kfmt == 1 && vfmt == 2) ||
+                  (kfmt == 2 && vfmt == 2),
+              "supported KV formats: bf16/bf16, fp8/fp8, fp8/fp4, fp4/fp4");
+}
+
 void attn_prep(torch::Tensor proj, torch::Tensor q_norm, torch::Tensor k_norm, torch::Tensor inv_freq, torch::Tensor q_out,
-               torch::Tensor k_cache, torch::Tensor v_cache, torch::Tensor cur_len, int64_t M, int64_t H, int64_t Hkv,
-               double eps) {
-  TORCH_CHECK(k_cache.size(-1) == 256, "attention kernels are compiled for head_dim 256");
+               torch::Tensor k_cache, torch::Tensor k_scale, torch::Tensor v_cache, torch::Tensor v_scale,
+               torch::Tensor signs, torch::Tensor cur_len, int64_t M, int64_t H, int64_t Hkv, double eps, int64_t kfmt,
+               int64_t vfmt, bool rotate) {
+  check_formats(kfmt, vfmt);
+  check_kv(k_cache, k_scale, kfmt, "k_cache");
+  check_kv(v_cache, v_scale, vfmt, "v_cache");
+  TORCH_CHECK(signs.numel() == 256 && signs.scalar_type() == torch::kFloat, "signs must be fp32 [256]");
   cck::AttnPrepArgs a{ptr<const void>(proj), (int)proj.stride(0), ptr<const float>(q_norm), ptr<const float>(k_norm),
-                      ptr<const float>(inv_freq), ptr<float>(q_out), ptr(k_cache), ptr(v_cache),
-                      ptr<const int>(cur_len), (int)k_cache.size(1), (int)M, (int)H, (int)Hkv,
-                      (int)inv_freq.numel() * 2, (float)eps};
+                      ptr<const float>(inv_freq), ptr<const float>(signs), ptr<float>(q_out), ptr(k_cache),
+                      ptr<uint8_t>(k_scale), ptr(v_cache), ptr<uint8_t>(v_scale), ptr<const int>(cur_len),
+                      (int)k_cache.size(1), (int)M, (int)H, (int)Hkv, (int)inv_freq.numel() * 2, (int)kfmt,
+                      (int)vfmt, (int)rotate, (float)eps};
   cck::attn_prep(a, stream());
 }
 
-void attn_decode(torch::Tensor q, torch::Tensor k_cache, torch::Tensor v_cache, torch::Tensor proj, torch::Tensor part_acc,
+void attn_decode(torch::Tensor q, torch::Tensor k_cache, torch::Tensor k_scale, torch::Tensor v_cache,
+                 torch::Tensor v_scale, torch::Tensor signs, torch::Tensor proj, torch::Tensor part_acc,
                  torch::Tensor part_ml, torch::Tensor counters, torch::Tensor out, torch::Tensor cur_len, int64_t M,
-                 int64_t H, int64_t Hkv, int64_t NS) {
+                 int64_t H, int64_t Hkv, int64_t NS, int64_t kfmt, int64_t vfmt, bool rotate) {
   TORCH_CHECK(H == 4 * Hkv, "attn_decode is compiled for GQA group size 4");
-  cck::AttnDecodeArgs a{ptr<const float>(q), ptr<const void>(k_cache), ptr<const void>(v_cache), ptr<const void>(proj),
-                        (int)proj.stride(0), ptr<float>(part_acc), ptr<float>(part_ml), ptr<int>(counters), ptr(out),
-                        ptr<const int>(cur_len), (int)k_cache.size(1), (int)M, (int)H, (int)Hkv, (int)NS};
+  check_formats(kfmt, vfmt);
+  check_kv(k_cache, k_scale, kfmt, "k_cache");
+  check_kv(v_cache, v_scale, vfmt, "v_cache");
+  cck::AttnDecodeArgs a{ptr<const float>(q), ptr<const void>(k_cache), ptr<const uint8_t>(k_scale),
+                        ptr<const void>(v_cache), ptr<const uint8_t>(v_scale), ptr<const float>(signs),
+                        ptr<const void>(proj), (int)proj.stride(0), ptr<float>(part_acc), ptr<float>(part_ml),
+                        ptr<int>(counters), ptr(out), ptr<const int>(cur_len), (int)k_cache.size(1), (int)M, (int)H,
+                        (int)Hkv, (int)NS, (int)kfmt, (int)vfmt, (int)rotate};
   cck::attn_decode(a, stream());
 }
 
@@ -106,6 +137,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("qgemm_skinny", &qgemm_skinny, "tensor-core GEMM for 2..8 tokens (speculative verify)");
   m.def("dequant", &dequant, "dequantize packed weight to bf16");
   m.def("gdn_decode", &gdn_decode, "Gated DeltaNet decode/verify step with deferred commit");
-  m.def("attn_prep", &attn_prep, "qk-norm + partial RoPE + KV append");
-  m.def("attn_decode", &attn_decode, "split-KV GQA flash-decoding with gated output");
+  m.def("attn_prep", &attn_prep, "qk-norm + partial RoPE + Hadamard rotation + quantized KV append");
+  m.def("attn_decode", &attn_decode, "split-KV GQA flash-decoding over a quantized KV cache, gated output");
 }

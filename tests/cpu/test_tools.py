@@ -68,7 +68,7 @@ def test_quantize_cli_balanced(tmp_path):
     assert man["bits"]["lm_head"] >= 8
     assert set(man["bits"].values()) <= {4, 5, 6, 8}
     assert (out / "tokenizer_config.json").exists()
-    eng = Engine(out, device="cpu", max_len=64, attn_splits=4)
+    eng = Engine(out, device="cpu", cpu_backend="emu", max_len=64, attn_splits=4)
     lg = eng.prefill(list(range(10)))
     assert torch.isfinite(lg).all()
 
@@ -104,7 +104,7 @@ def _check_stream_out(out: Path):
     assert abs(rep["ppl_quant"] / rep["ppl_ref"] - 1) < 5e-3, rep
     man = json.loads((out / "cck_manifest.json").read_text())
     assert set(man["bits"].values()) == {8} and "quality" in man
-    eng = Engine(out, device="cpu", max_len=64, attn_splits=4)
+    eng = Engine(out, device="cpu", cpu_backend="emu", max_len=64, attn_splits=4)
     assert torch.isfinite(eng.prefill(list(range(12)))).all()
 
 

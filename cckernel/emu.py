@@ -9,6 +9,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from . import kvq
 from . import torch_ops as T
 from .quant import dequant_rtn, unpack
 
@@ -67,6 +68,10 @@ def dequant(lo, hi, scales, bits, N, K, out):
     out[: N * K].view(N, K).copy_(_w(lo, hi, scales, bits, N, K).to(torch.bfloat16))
 
 
+def dequant_rows(lo, hi, scales, bits, N, K, r0, r1, out):
+    out[: (r1 - r0) * K].view(r1 - r0, K).copy_(_w(lo, hi, scales, bits, N, K)[r0:r1].to(torch.bfloat16))
+
+
 def gdn_decode(proj, ring, conv_w, A_log, dt_bias, S, pend_u, pend_g, out, cur_len, n_commit, M, Hk, Hv, C):
     L, a = int(cur_len.item()), int(n_commit.item())
     rep, kd, Vd = Hv // Hk, Hk * 128, Hv * 128
@@ -111,29 +116,46 @@ def gdn_decode(proj, ring, conv_w, A_log, dt_bias, S, pend_u, pend_g, out, cur_l
         pend_g[m].copy_(g[:, None].expand(-1, pend_g.shape[-1]))
 
 
-def attn_prep(proj, q_norm, k_norm, inv_freq, q_out, k_cache, v_cache, cur_len, M, H, Hkv, eps):
+def attn_prep(proj, q_norm, k_norm, inv_freq, q_out, k_cache, k_scale, v_cache, v_scale, signs, cur_len, M, H, Hkv,
+              eps, kfmt=0, vfmt=0, rotate=False):
     L = int(cur_len.item())
-    D = k_cache.shape[-1]
+    D = q_out.shape[-1]
     pos = torch.arange(L, L + M, device=proj.device)
     qg = proj[:M, : H * 2 * D].float().reshape(M, H, 2 * D)
     k = proj[:M, H * 2 * D: H * 2 * D + Hkv * D].float().reshape(M, Hkv, D)
-    v = proj[:M, H * 2 * D + Hkv * D: H * 2 * D + 2 * Hkv * D].reshape(M, Hkv, D)
+    v = proj[:M, H * 2 * D + Hkv * D: H * 2 * D + 2 * Hkv * D].float().reshape(M, Hkv, D)
     q = T.rope_bf16(T.rms_norm_w(qg[..., :D], q_norm, eps), pos, inv_freq)
     k = T.rope_bf16(T.rms_norm_w(k, k_norm, eps), pos, inv_freq)
+    if rotate:
+        q, k, v = kvq.rotate(q, signs), kvq.rotate(k, signs), kvq.rotate(v, signs)
     q_out[:M].copy_(q)
-    k_cache[:, L:L + M] = k.transpose(0, 1).to(torch.bfloat16)
-    v_cache[:, L:L + M] = v.transpose(0, 1)
+    for f, x, data, scale in ((kfmt, k, k_cache, k_scale), (vfmt, v, v_cache, v_scale)):
+        d, s = kvq.encode(f, x.transpose(0, 1))
+        data[:, L:L + M] = d
+        if s is not None:
+            scale[:, L:L + M] = s
 
 
-def attn_decode(q, k_cache, v_cache, proj, part_acc, part_ml, counters, out, cur_len, M, H, Hkv, NS):
-    L = int(cur_len.item())
-    D = k_cache.shape[-1]
+def attn_rows(q, K, V, proj, out, L, M, H, Hkv, rotate, signs):
+    """Causal attention of the M new tokens over the fp32 keys / values K, V [Hkv, >= L+M, D]
+    (GQA: query head h reads kv head h // (H / Hkv)), un-rotation, sigmoid output gate."""
+    D = q.shape[-1]
     rep = H // Hkv
     for m in range(M):
         Lm = L + m + 1
-        K = k_cache[:, :Lm].float().repeat_interleave(rep, dim=0)  # [H, Lm, D]
-        V = v_cache[:, :Lm].float().repeat_interleave(rep, dim=0)
-        s = torch.einsum("hd,hld->hl", q[m].float(), K) * D ** -0.5
-        o = torch.einsum("hl,hld->hd", s.softmax(-1), V)
+        qm = q[m].float().reshape(Hkv, rep, D)
+        s = torch.einsum("gqd,gld->gql", qm, K[:, :Lm]) * D ** -0.5
+        o = torch.einsum("gql,gld->gqd", s.softmax(-1), V[:, :Lm]).reshape(H, D)
+        if rotate:
+            o = kvq.unrotate(o, signs)
         gate = proj[m, : H * 2 * D].float().reshape(H, 2 * D)[:, D:]
         out[m].copy_((T.bf16r(o) * T.bf16r(torch.sigmoid(gate))).reshape(-1).to(torch.bfloat16))
+
+
+def attn_decode(q, k_cache, k_scale, v_cache, v_scale, signs, proj, part_acc, part_ml, counters, out, cur_len, M, H,
+                Hkv, NS, kfmt=0, vfmt=0, rotate=False):
+    L = int(cur_len.item())
+    Lt = L + M
+    K = kvq.decode(kfmt, k_cache[:, :Lt], k_scale[:, :Lt] if kfmt == kvq.FP4 else None)  # [Hkv, Lt, D] fp32
+    V = kvq.decode(vfmt, v_cache[:, :Lt], v_scale[:, :Lt] if vfmt == kvq.FP4 else None)
+    attn_rows(q, K, V, proj, out, L, M, H, Hkv, rotate, signs)

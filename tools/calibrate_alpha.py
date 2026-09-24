@@ -23,7 +23,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cckernel import quant  # noqa: E402
-from cckernel.engine import Engine, QLin  # noqa: E402
+from cckernel.engine import Engine  # noqa: E402
 
 
 def calib_batches(args, eng: Engine):
@@ -42,7 +42,7 @@ def swap(eng: Engine, name: str, w: torch.Tensor, bits: int):
     q = quant.QLinear.from_weight(w, bits, clip_grid=8)
     old = eng.lin[name]
     sd = q.state(name)
-    eng.lin[name] = QLin(sd, name, bits, q.N, q.K, eng.dev)
+    eng.lin[name] = eng._qlin(sd, name, bits, (q.N, q.K))
     return old
 
 

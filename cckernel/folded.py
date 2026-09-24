@@ -10,6 +10,7 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 
+from . import kvq
 from .config import TextConfig
 from .reference import _f, apply_partial_rope, causal_conv1d, gdn_chunked, gdn_gates, gdn_recurrent, l2norm, rope_cos_sin
 
@@ -29,12 +30,16 @@ class FoldedModel:
     """``lin(name)`` returns a function x[T, K] -> y[T, N]; ``t(name)`` returns a small fp32 tensor."""
 
     def __init__(self, cfg: TextConfig, tensors: dict[str, torch.Tensor], linears: dict[str, Callable] | None = None,
-                 gdn_algo: str = "recurrent", dtype=torch.float32):
+                 gdn_algo: str = "recurrent", dtype=torch.float32, kv_format: str = "bf16", kv_rotate: bool = False,
+                 kv_signs: torch.Tensor | None = None):
         self.cfg = cfg
         self.tensors = tensors
         self.dtype = dtype
         self.gdn_algo = gdn_algo
         self.linears = linears or {}
+        # optional quantized KV cache semantics (kvq): K after RoPE and V are (rotated and) fake-quantized
+        self.kv_format, self.kv_rotate = kv_format, kv_rotate
+        self.kv_signs = kv_signs
 
     def lin(self, name: str, x: torch.Tensor) -> torch.Tensor:
         f = self.linears.get(name)
@@ -79,6 +84,11 @@ class FoldedModel:
         cos, sin = rope_cos_sin(positions.cpu(), c.rotary_dim, c.rope_theta)
         cos, sin = cos.to(x.device), sin.to(x.device)
         q, k = apply_partial_rope(q, cos, sin), apply_partial_rope(k, cos, sin)
+        if self.kv_rotate:
+            q, k, v = (kvq.rotate(t, self.kv_signs).to(q.dtype) for t in (q, k, v))
+        if self.kv_format != "bf16" or self.kv_rotate:
+            kf, vf = kvq.KV_FORMATS[self.kv_format]
+            k, v = kvq.fake_quant(kf, k).to(q.dtype), kvq.fake_quant(vf, v).to(q.dtype)
         K = torch.cat([cache.k[i], k]) if i in cache.k else k
         V = torch.cat([cache.v[i], v]) if i in cache.v else v
         cache.k[i], cache.v[i] = K, V
@@ -86,8 +96,10 @@ class FoldedModel:
         scores = torch.einsum("thd,shd->hts", q, K.repeat_interleave(rep, dim=1)) * D ** -0.5
         kpos = torch.arange(K.shape[0], device=x.device)[None, :]
         scores = scores.masked_fill((kpos > positions[:, None])[None], float("-inf"))
-        o = torch.einsum("hts,shd->thd", scores.softmax(-1), V.repeat_interleave(rep, dim=1)).reshape(T, H * D)
-        o = o * torch.sigmoid(_f(gate))
+        o = torch.einsum("hts,shd->thd", scores.softmax(-1), V.repeat_interleave(rep, dim=1))
+        if self.kv_rotate:
+            o = kvq.unrotate(o, self.kv_signs).to(o.dtype)
+        o = o.reshape(T, H * D) * torch.sigmoid(_f(gate))
         return self.lin(p + "o_proj", o.to(self.dtype))
 
     def mlp(self, i, x):

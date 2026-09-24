@@ -49,7 +49,7 @@ def _close(a, b, tol=3e-2):
 
 
 def test_prefill_and_decode_match_oracle(model_dir):
-    eng = Engine(model_dir, device="cpu", max_len=96, attn_splits=4, prefill_chunk=16)
+    eng = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4, prefill_chunk=16)
     ref = _oracle(eng)
     ids = torch.randint(0, CFG.vocab_size, (26,)).tolist()
     prompt, rest = ids[:21], ids[21:]
@@ -68,7 +68,7 @@ def test_speculative_verify_equals_greedy(model_dir):
     prompt = torch.randint(0, CFG.vocab_size, (12,)).tolist()
 
     def greedy(n):
-        eng = Engine(model_dir, device="cpu", max_len=96, attn_splits=4)
+        eng = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4)
         tok = int(eng.prefill(prompt).argmax())
         out = [tok]
         for _ in range(n - 1):
@@ -79,7 +79,7 @@ def test_speculative_verify_equals_greedy(model_dir):
         return out
 
     want = greedy(14)
-    eng = Engine(model_dir, device="cpu", max_len=96, attn_splits=4)
+    eng = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4)
     tok = int(eng.prefill(prompt).argmax())
     got = [tok]
     rng = torch.Generator().manual_seed(7)
@@ -99,13 +99,13 @@ def test_speculative_verify_equals_greedy(model_dir):
 def test_multiturn_prefill_after_decode(model_dir):
     torch.manual_seed(2)
     ids = torch.randint(0, CFG.vocab_size, (30,)).tolist()
-    a = Engine(model_dir, device="cpu", max_len=96, attn_splits=4)
+    a = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4)
     a.prefill(ids[:10])
     for t in ids[10:14]:
         a.step([t])
         a.commit(1)
     lg_a = a.prefill(ids[14:])  # second turn after decode steps (pending commit must be applied)
-    b = Engine(model_dir, device="cpu", max_len=96, attn_splits=4, prefill_chunk=7)
+    b = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4, prefill_chunk=7)
     lg_b = b.prefill(ids)
     _close(lg_a, lg_b, tol=1e-2)
 
@@ -113,7 +113,7 @@ def test_multiturn_prefill_after_decode(model_dir):
 def test_ngram_drafter_in_loop(model_dir):
     """The drafter never changes the output (exactness), only the number of steps."""
     prompt = [5, 6, 7, 8, 9, 5, 6, 7, 8, 9, 5, 6, 7]
-    eng = Engine(model_dir, device="cpu", max_len=96, attn_splits=4)
+    eng = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4)
     tok = int(eng.prefill(prompt).argmax())
     d = NGramDrafter()
     d.reset(prompt + [tok])
@@ -127,7 +127,7 @@ def test_ngram_drafter_in_loop(model_dir):
         d.extend(em)
         out += em
         tok = out[-1]
-    ref = Engine(model_dir, device="cpu", max_len=96, attn_splits=4)
+    ref = Engine(model_dir, device="cpu", cpu_backend="emu", max_len=96, attn_splits=4)
     t = int(ref.prefill(prompt).argmax())
     want = [t]
     while len(want) < 10:

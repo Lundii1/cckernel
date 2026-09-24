@@ -50,27 +50,38 @@ struct GdnDecodeArgs {
 };
 void gdn_decode(const GdnDecodeArgs& a, cudaStream_t stream);
 
-// Attention: qk-norm + partial RoPE + KV-cache append for M tokens.
+// KV cache formats (cckernel/kvq.py): BF16 [Hkv, max_len, D] bf16; FP8 [Hkv, max_len, D] e4m3 codes;
+// FP4 [Hkv, max_len, D/2] E2M1 nibbles (low nibble = even channel) + [Hkv, max_len, D/16] E4M3 scales.
+enum KvFormat { KV_BF16 = 0, KV_FP8 = 1, KV_FP4 = 2 };
+
+// Attention: qk-norm + partial RoPE (+ per-head Hadamard rotation) + quantized KV-cache append.
 struct AttnPrepArgs {
   const void* proj;       // bf16 [M, proj_stride]: [q|gate per head (H*2D) | k (Hkv*D) | v (Hkv*D)]
   int proj_stride;
   const float* q_norm;    // [D] (1 + w)
   const float* k_norm;    // [D] (1 + w)
   const float* inv_freq;  // [rot/2]
-  float* q_out;           // [M, H, D]
-  void* k_cache;          // bf16 [Hkv, max_len, D]
-  void* v_cache;          // bf16 [Hkv, max_len, D]
+  const float* signs;     // [D] Hadamard signs (used when rotate)
+  float* q_out;           // [M, H, D] (rotated when rotate)
+  void* k_cache;          // K data (format kfmt)
+  uint8_t* k_scale;       // FP4 scales or null
+  void* v_cache;
+  uint8_t* v_scale;
   const int* cur_len;
-  int max_len, M, H, Hkv, rot;
+  int max_len, M, H, Hkv, rot, kfmt, vfmt, rotate;
   float eps;
 };
 void attn_prep(const AttnPrepArgs& a, cudaStream_t stream);
 
-// Split-KV flash-decoding with GQA packing, in-kernel split combine and sigmoid output gate.
+// Split-KV flash-decoding with GQA packing, in-kernel dequantization of the KV cache, split combine,
+// inverse rotation and the sigmoid output gate.
 struct AttnDecodeArgs {
   const float* q;         // [M, H, D]
-  const void* k_cache;    // bf16 [Hkv, max_len, D]
+  const void* k_cache;
+  const uint8_t* k_scale;
   const void* v_cache;
+  const uint8_t* v_scale;
+  const float* signs;     // [D]
   const void* proj;       // bf16 [M, proj_stride] (gate read from the q_proj part)
   int proj_stride;
   float* part_acc;        // [M, NS, H, D]
@@ -78,7 +89,7 @@ struct AttnDecodeArgs {
   int* counters;          // [M, Hkv] zero-initialised
   void* out;              // bf16 [M, H*D]
   const int* cur_len;
-  int max_len, M, H, Hkv, NS;
+  int max_len, M, H, Hkv, NS, kfmt, vfmt, rotate;
 };
 void attn_decode(const AttnDecodeArgs& a, cudaStream_t stream);
 
