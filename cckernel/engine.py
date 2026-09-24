@@ -112,14 +112,8 @@ class Engine:
         self.dev = torch.device(device)
         runtime = man.get("runtime", {})
         self.kv_requested = kv_format or os.environ.get("CCK_KV") or runtime.get("kv_cache", "bf16")
-        if self.kv_requested == "auto":
-            free = None
-            if self.dev.type == "cuda":  # what is left once the weights (loaded below) and ~0.8 GiB of buffers are in
-                free = torch.cuda.mem_get_info(self.dev)[0] - man["quantized_weight_bytes"] - man["embed_bytes"] - 0.8 * 2**30
-            self.kv_format = kvq.auto_format(max_len, len(cfg.attn_layers), cfg.num_key_value_heads, cfg.head_dim,
-                                             man["quantized_weight_bytes"], free)
-        else:
-            self.kv_format = self.kv_requested
+        self.max_len = max_len
+        self.kv_format = self._resolve_kv(self.kv_requested, loaded=False)
         self.kfmt, self.vfmt = kvq.KV_FORMATS[self.kv_format]
         self.kv_rotate = (self.kv_format != "bf16") if kv_rotate is None else kv_rotate
         self.kv_signs = kvq.kv_signs(runtime.get("kv_rotate_seed", kvq.KV_SEED), cfg.head_dim).to(self.dev)
@@ -207,8 +201,24 @@ class Engine:
             self.kc[i], self.ks[i] = kvq.alloc(self.kfmt, Hkv, self.max_len, D, d)
             self.vc[i], self.vs[i] = kvq.alloc(self.vfmt, Hkv, self.max_len, D, d)
 
+    def _resolve_kv(self, fmt: str, loaded: bool) -> str:
+        """``auto`` -> the most accurate KV format that pays off for max_len (kvq.auto_format)."""
+        if fmt != "auto":
+            return fmt
+        man, cfg = self.manifest, self.cfg
+        free = None
+        if self.dev.type == "cuda":  # what is left for the cache next to the weights and ~0.8 GiB of buffers
+            free = torch.cuda.mem_get_info(self.dev)[0] - 0.8 * 2**30
+            if loaded:
+                free += self.kv_bytes() if getattr(self, "kc", None) else 0
+            else:
+                free -= man["quantized_weight_bytes"] + man["embed_bytes"]
+        return kvq.auto_format(self.max_len, len(cfg.attn_layers), cfg.num_key_value_heads, cfg.head_dim,
+                               man["quantized_weight_bytes"], free)
+
     def set_kv_format(self, kv_format: str, kv_rotate: bool | None = None):
-        """Switch the KV cache format (re-allocates the cache and drops captured graphs)."""
+        """Switch the KV cache format (re-allocates the cache and drops captured graphs); accepts "auto"."""
+        kv_format = self._resolve_kv(kv_format, loaded=True)
         self.kv_format = kv_format
         self.kfmt, self.vfmt = kvq.KV_FORMATS[kv_format]
         self.kv_rotate = (kv_format != "bf16") if kv_rotate is None else kv_rotate

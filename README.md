@@ -178,6 +178,53 @@ This is the 15-prompt suite in `tools/eval_generate.py`: chat template, greedy d
 
 Full transcripts: [`docs/samples/`](docs/samples).
 
+## Compared with llama.cpp
+
+The baseline is running the same model with llama.cpp, using the official GGUF `ggml-org/MiMo-V2.6-Distill-Qwen-9B-GGUF`. Q8_0 is the same quality class as our INT8. Script: [`bench/vs_llamacpp.py`](bench/vs_llamacpp.py).
+
+**Measured on this machine's CPU** (4-core Xeon with AMX, llama.cpp build 97a418b, [`docs/vs_llamacpp_cpu.json`](docs/vs_llamacpp_cpu.json)):
+
+| | llama.cpp Q8_0 | cckernel INT8 |
+|---|---|---|
+| Raw decode, 0 / 4K context | 4.6 / 4.5 tok/s (f16 KV); 4.8 / 4.7 (q8_0 KV) | 1.5 / 1.4 tok/s (bf16 KV); 1.5 / 1.5 (fp4 KV) |
+| 15-prompt suite, no speculation | 5.2 tok/s, 15/15 pass | 1.5 tok/s, 14/15 pass |
+| 15-prompt suite with n-gram speculation | 6.0 tok/s (`--spec-type ngram-simple`, 1.16×) | 1.8 tok/s (confidence-scheduled, 1.23×) |
+| Tokens per step with speculation (hardware independent) | 1.21 (it drafts only on the code-edit prompt) | ≈1.45 (it also drafts on math and prose) |
+
+- **On CPU, llama.cpp is about 3× faster.** Its hand-tuned AVX-512/AMX int8 kernels beat this repository's CPU backend, which exists to test and measure the model without a GPU. For CPU inference, use llama.cpp.
+- **Both speculators are exact.** On this suite ours gets more tokens per step, but the gain is content-dependent.
+- **Quality:** llama.cpp Q8_0 also passes the JSON prompt, where our INT8 build hits a three-way near-tie (see above).
+
+**Modeled on an RTX 4060 Ti** (bandwidth roofline, `tools/kv_roofline.py` method). Both engines are assumed to reach 80 % of 288 GB/s. This is **not measured**: cckernel's CUDA kernels have not run on a GPU yet, while llama.cpp's are mature, so treat the cckernel columns as an upper bound.
+
+| Decode tok/s, one sequence | 4K context | 32K context | 128K context |
+|---|---|---|---|
+| llama.cpp BF16 GGUF (the unquantized model) | 14.3 (15.6 GiB before KV, so it does not really fit a 16 GB card) | 13.5 | does not fit |
+| llama.cpp Q8_0, f16 KV (default) | 26.5 | 23.9 | 17.9 |
+| llama.cpp Q8_0, q8_0 / q4_0 KV (`-ctk/-ctv`) | 26.7 / 26.8 | 25.3 / 26.0 | 21.3 / 23.6 |
+| **cckernel INT8, `--kv auto`** | **27.8** (bf16 KV) | **26.5** (fp8 KV) | **24.6** (fp4 KV) |
+
+With speculation on the 15-prompt mix (replayed with a 4060 Ti cost model):
+- **cckernel:** 1.53× at short context and about 1.4× at 32K.
+- **llama.cpp `ngram-simple`:** about 1.2× (1.21 tokens/step with nearly free verification).
+
+So the expected end-to-end gain for this prompt mix:
+
+| cckernel INT8 + speculation vs … | Short context | 32K context |
+|---|---|---|
+| llama.cpp BF16 | ≈3× | ≈3×, if BF16 fits at all |
+| llama.cpp Q8_0 | ≈1.6× | ≈1.55× (f16 KV) |
+| llama.cpp Q8_0 + its n-gram speculation | ≈1.3× | ≈1.3× |
+
+Raw decode alone is only 1.05× faster than Q8_0 at 4K. That comes from 8.1 instead of 8.5 bits per weight, and is within kernel-efficiency noise. The real GPU numbers come from:
+
+```bash
+python bench/vs_llamacpp.py --gguf MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf --llama-bin ~/llama.cpp/build/bin \
+    --model /models/mimo-cck-q8 --ctx 0 8192 32768 --out vs_llamacpp_gpu.json
+```
+
+<!--MMLU-->
+
 ## Validation status
 
 - **70 CPU tests pass.** New since the DeepSeek integration:
@@ -206,8 +253,9 @@ cckernel/    config, loader, reference (fp32 oracle), quant + packing, alloc, fo
              torch_ops (prefill), kvq (KV formats), emu (CUDA-op emulation), cpu (CPU backend),
              engine, spec (drafter + scheduler + replay), prefix_cache, generate
 csrc/        common.cuh, qgemv.cu, gdn.cu, attn.cu, skinny.cu, bindings.cpp
-tools/       quantize.py, quantize_stream.py, calibrate_alpha.py, eval_quality.py, eval_generate.py, kv_roofline.py
+tools/       quantize.py, quantize_stream.py, calibrate_alpha.py, eval_quality.py, eval_generate.py, eval_mmlu_pro.py,
+             kv_roofline.py
 tests/cpu    math + emulated end-to-end tests      tests/gpu   kernel/engine/HF parity
-bench/       kernels.py, decode.py
+bench/       kernels.py, decode.py, vs_llamacpp.py
 docs/        MATH.md, eval_kv.json, eval_generate.json, kv_roofline.json, samples/
 ```

@@ -1,0 +1,663 @@
+{
+ "device": "cpu",
+ "gguf": "/home/user/models/gguf/MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf",
+ "model": "/home/user/models/mimo-cck-q8",
+ "raw": {
+  "llama.cpp": {
+   "f16": {
+    "0": 4.571995,
+    "4096": 4.495073
+   },
+   "q8_0": {
+    "0": 4.768449,
+    "4096": 4.668113
+   }
+  },
+  "cckernel": {
+   "bf16": {
+    "0": 1.5235387903860742,
+    "4096": 1.4373429897274266
+   },
+   "fp4": {
+    "0": 1.4839416266875656,
+    "4096": 1.4670379076876758
+   }
+  }
+ },
+ "suite": {
+  "llama.cpp": [
+   {
+    "id": "math_train",
+    "ok": true,
+    "why": "last number 270",
+    "text": "<think></think>60 km/h \u00d7 2.5 h = 150 km  \n80 km/h \u00d7 1.5 h = 120 km  \n150 + 120 = 270 km\n\n270",
+    "predicted_n": 53,
+    "predicted_ms": 10549.489,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 32.90891283055827
+   },
+   {
+    "id": "math_discount",
+    "ok": true,
+    "why": "last number 22",
+    "text": "<think></think>1. Discount: $25 \u00d7 0.20 = $5 off \u2192 $25 \u2212 $5 = $20\n2. Tax: $20 \u00d7 0.10 = $2 \u2192 $20 + $2 = $22\n\nFinal price: $22",
+    "predicted_n": 64,
+    "predicted_ms": 12596.022,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 34.57573619828627
+   },
+   {
+    "id": "math_mul",
+    "ok": true,
+    "why": "last number 391",
+    "text": "<think></think>391",
+    "predicted_n": 4,
+    "predicted_ms": 589.566,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 26.336874967712006
+   },
+   {
+    "id": "code_prime",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\ndef is_prime(n):\n    if n < 2:\n        return False\n    if n == 2:\n        return True\n    if n % 2 == 0:\n        return False\n    i = 3\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i += 2\n    return True\n```",
+    "predicted_n": 89,
+    "predicted_ms": 17652.049,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 22.242652510454047
+   },
+   {
+    "id": "code_fizzbuzz",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            result.append(\"FizzBuzz\")\n        elif i % 3 == 0:\n            result.append(\"Fizz\")\n        elif i % 5 == 0:\n            result.append(\"Buzz\")\n        else:\n            result.append(str(i))\n    return result\n```",
+    "predicted_n": 101,
+    "predicted_ms": 19766.41,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 26.54014348359857
+   },
+   {
+    "id": "code_words",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\ndef reverse_words(s):\n    return \" \".join(s.split()[::-1])\n```",
+    "predicted_n": 23,
+    "predicted_ms": 4340.807,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 28.159633288114676
+   },
+   {
+    "id": "json_profile",
+    "ok": true,
+    "why": "keys ['age', 'languages', 'name']",
+    "text": "<think></think>{\"name\": \"Ada Lovelace\",\"age\": 34,\"languages\": [\"Python\", \"C++\", \"SQL\"]}",
+    "predicted_n": 28,
+    "predicted_ms": 5245.528,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 22.55765091068459
+   },
+   {
+    "id": "fact_capital",
+    "ok": true,
+    "why": "Canberra",
+    "text": "<think></think>Canberra",
+    "predicted_n": 3,
+    "predicted_ms": 402.95,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 23.810915356525165
+   },
+   {
+    "id": "fact_author",
+    "ok": true,
+    "why": "Jane Austen",
+    "text": "<think></think>Jane Austen",
+    "predicted_n": 4,
+    "predicted_ms": 556.675,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 27.500324788318622
+   },
+   {
+    "id": "fact_gold",
+    "ok": true,
+    "why": "Au",
+    "text": "<think></think>Au",
+    "predicted_n": 2,
+    "predicted_ms": 214.466,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 24.787527778196893
+   },
+   {
+    "id": "summary",
+    "ok": true,
+    "why": "Photosynthesis is the process by which green plants, algae, and some bacteria us",
+    "text": "<think></think>Photosynthesis is the process by which green plants, algae, and some bacteria use chlorophyll in chloroplasts to convert sunlight, carbon dioxide, and water into glucose and oxygen, forming the foundation of most food chains and producing Earth's atmospheric oxygen.",
+    "predicted_n": 52,
+    "predicted_ms": 10096.857,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 36.54985909464115
+   },
+   {
+    "id": "code_edit",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\nfrom typing import List, Tuple, Union\n\n\ndef merge_intervals(intervals: List[List[int]]) -> List[Tuple[int, int]]:\n    \"\"\"Merge overlapping intervals and return them as tuples.\"\"\"\n    if not intervals:\n        return []\n    intervals = sorted(intervals, key=lambda iv: iv[0])\n    merged = [list(intervals[0])]\n    for start, end in intervals[1:]:\n        last = merged[-1]\n        if start <= last[1]:\n            last[1] = max(last[1], end)\n        else:\n            merged.append([start, end])\n    return [tuple(iv) for iv in merged]\n\n\ndef moving_average(\n    values: List[Union[int, float]], window: int\n) -> List[float]:\n    \"\"\"Compute a moving average of the values using a sliding window.\"\"\"\n    if window <= 0:\n        raise ValueError(\"window must be positive\")\n    out = []\n    total = 0.0\n    for i, v in enumerate(values):\n        total += v\n        if i >= window:\n            total -= values[i - window]\n        if i >= window - 1:\n            out.append(total / window)\n    return out\n```",
+    "predicted_n": 275,
+    "predicted_ms": 53748.159,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 43.63107923473521
+   },
+   {
+    "id": "multiturn",
+    "ok": true,
+    "why": "Lyon.",
+    "text": "<think></think>Hi Priya! Nice to meet you \u2014 Lyon is a lovely city.\n\n[turn 2]\n<think></think>Lyon.",
+    "predicted_n": 20,
+    "predicted_ms": 3589.799,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 32.04049919097739
+   },
+   {
+    "id": "think_strawberry",
+    "ok": true,
+    "why": "answer states 3",
+    "text": "<think>\nThe word is \"strawberry\". Let me count the letter 'r'.\n\ns-t-r-a-w-b-e-r-r-y\n\nPositions:\n1. s\n2. t\n3. r (1)\n4. a\n5. w\n6. b\n7. e\n8. r (2)\n9. r (3)\n10. y\n\nSo 3 r's.</think>3",
+    "predicted_n": 90,
+    "predicted_ms": 17197.806,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 32.24753599509056
+   },
+   {
+    "id": "think_batball",
+    "ok": true,
+    "why": "answer states 5",
+    "text": "<think>\nThe user asks: bat and ball cost $1.10 total. Bat costs $1.00 more than ball. How many cents does the ball cost?\n\nLet ball = x cents. Bat = x + 100 cents. Total = x + x + 100 = 110 cents. 2x = 10, x = 5. Ball = 5 cents.\n\nAnswer: 5.</think>The ball costs 5 cents.\n\nLet the ball cost $x$ cents. Then the bat costs $x + 100$ cents. Together:\n\n$$x + (x + 100) = 110$$\n$$2x = 10$$\n$$x = 5$$\n\nSo the ball costs **5 cents** and the bat costs **$1.05**.",
+    "predicted_n": 182,
+    "predicted_ms": 34364.117,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 33.354107589233045
+   }
+  ],
+  "llama.cpp+ngram-simple": [
+   {
+    "id": "math_train",
+    "ok": true,
+    "why": "last number 270",
+    "text": "<think></think>60 km/h \u00d7 2.5 h = 150 km  \n80 km/h \u00d7 1.5 h = 120 km  \n150 + 120 = 270 km\n\n270",
+    "predicted_n": 53,
+    "predicted_ms": 10057.651,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 35.23328348476188
+   },
+   {
+    "id": "math_discount",
+    "ok": true,
+    "why": "last number 22",
+    "text": "<think></think>1. Discount: $25 \u00d7 0.20 = $5 off \u2192 $25 \u2212 $5 = $20\n2. Tax: $20 \u00d7 0.10 = $2 \u2192 $20 + $2 = $22\n\nFinal price: $22",
+    "predicted_n": 64,
+    "predicted_ms": 12093.76,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 34.48874331919666
+   },
+   {
+    "id": "math_mul",
+    "ok": true,
+    "why": "last number 391",
+    "text": "<think></think>391",
+    "predicted_n": 4,
+    "predicted_ms": 560.322,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 28.19063810593608
+   },
+   {
+    "id": "code_prime",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\ndef is_prime(n):\n    if n < 2:\n        return False\n    if n == 2:\n        return True\n    if n % 2 == 0:\n        return False\n    i = 3\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i += 2\n    return True\n```",
+    "predicted_n": 89,
+    "predicted_ms": 17656.066,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 24.14153839079403
+   },
+   {
+    "id": "code_fizzbuzz",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            result.append(\"FizzBuzz\")\n        elif i % 3 == 0:\n            result.append(\"Fizz\")\n        elif i % 5 == 0:\n            result.append(\"Buzz\")\n        else:\n            result.append(str(i))\n    return result\n```",
+    "predicted_n": 101,
+    "predicted_ms": 19281.329,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 24.364334512567122
+   },
+   {
+    "id": "code_words",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\ndef reverse_words(s):\n    return \" \".join(s.split()[::-1])\n```",
+    "predicted_n": 23,
+    "predicted_ms": 4344.887,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 24.834459432100697
+   },
+   {
+    "id": "json_profile",
+    "ok": true,
+    "why": "keys ['age', 'languages', 'name']",
+    "text": "<think></think>{\"name\": \"Ada Lovelace\",\"age\": 34,\"languages\": [\"Python\", \"C++\", \"SQL\"]}",
+    "predicted_n": 28,
+    "predicted_ms": 5144.473,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 23.754084147146372
+   },
+   {
+    "id": "fact_capital",
+    "ok": true,
+    "why": "Canberra",
+    "text": "<think></think>Canberra",
+    "predicted_n": 3,
+    "predicted_ms": 433.33,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 23.483299104645848
+   },
+   {
+    "id": "fact_author",
+    "ok": true,
+    "why": "Jane Austen",
+    "text": "<think></think>Jane Austen",
+    "predicted_n": 4,
+    "predicted_ms": 570.995,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 27.750080857994227
+   },
+   {
+    "id": "fact_gold",
+    "ok": true,
+    "why": "Au",
+    "text": "<think></think>Au",
+    "predicted_n": 2,
+    "predicted_ms": 192.84,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 25.433081140375126
+   },
+   {
+    "id": "summary",
+    "ok": true,
+    "why": "Photosynthesis is the process by which green plants, algae, and some bacteria us",
+    "text": "<think></think>Photosynthesis is the process by which green plants, algae, and some bacteria use chlorophyll in chloroplasts to convert sunlight, carbon dioxide, and water into glucose and oxygen, forming the foundation of most food chains and producing Earth's atmospheric oxygen.",
+    "predicted_n": 52,
+    "predicted_ms": 10326.06,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 34.658961181606166
+   },
+   {
+    "id": "code_edit",
+    "ok": true,
+    "why": "tests pass",
+    "text": "<think></think>```python\nfrom typing import List, Tuple, Union\n\n\ndef merge_intervals(intervals: List[List[int]]) -> List[Tuple[int, int]]:\n    \"\"\"Merge overlapping intervals and return them as tuples.\"\"\"\n    if not intervals:\n        return []\n    intervals = sorted(intervals, key=lambda iv: iv[0])\n    merged = [list(intervals[0])]\n    for start, end in intervals[1:]:\n        last = merged[-1]\n        if start <= last[1]:\n            last[1] = max(last[1], end)\n        else:\n            merged.append([start, end])\n    return [tuple(iv) for iv in merged]\n\n\ndef moving_average(\n    values: List[Union[int, float]], window: int\n) -> List[float]:\n    \"\"\"Compute a moving average of the values using a sliding window.\"\"\"\n    if window <= 0:\n        raise ValueError(\"window must be positive\")\n    out = []\n    total = 0.0\n    for i, v in enumerate(values):\n        total += v\n        if i >= window:\n            total -= values[i - window]\n        if i >= window - 1:\n            out.append(total / window)\n    return out\n```",
+    "predicted_n": 275,
+    "predicted_ms": 27049.567,
+    "draft_n": 192,
+    "draft_n_accepted": 170,
+    "prompt_per_second": 45.19403726797543
+   },
+   {
+    "id": "multiturn",
+    "ok": true,
+    "why": "Lyon.",
+    "text": "<think></think>Hi Priya! Nice to meet you \u2014 Lyon is a lovely city.\n\n[turn 2]\n<think></think>Lyon.",
+    "predicted_n": 20,
+    "predicted_ms": 3497.246,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 28.617730891941083
+   },
+   {
+    "id": "think_strawberry",
+    "ok": true,
+    "why": "answer states 3",
+    "text": "<think>\nThe word is \"strawberry\". Let me count the letter 'r'.\n\ns-t-r-a-w-b-e-r-r-y\n\nPositions:\n1. s\n2. t\n3. r (1)\n4. a\n5. w\n6. b\n7. e\n8. r (2)\n9. r (3)\n10. y\n\nSo 3 r's.</think>3",
+    "predicted_n": 90,
+    "predicted_ms": 17730.53,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 27.411734215825042
+   },
+   {
+    "id": "think_batball",
+    "ok": true,
+    "why": "answer states 5",
+    "text": "<think>\nThe user asks: bat and ball cost $1.10 total. Bat costs $1.00 more than ball. How many cents does the ball cost?\n\nLet ball = x cents. Bat = x + 100 cents. Total = x + x + 100 = 110 cents. 2x = 10, x = 5. Ball = 5 cents.\n\nAnswer: 5.</think>The ball costs 5 cents.\n\nLet the ball cost $x$ cents. Then the bat costs $x + 100$ cents. Together:\n\n$$x + (x + 100) = 110$$\n$$2x = 10$$\n$$x = 5$$\n\nSo the ball costs **5 cents** and the bat costs **$1.05**.",
+    "predicted_n": 182,
+    "predicted_ms": 35812.257,
+    "draft_n": 0,
+    "draft_n_accepted": 0,
+    "prompt_per_second": 31.23987596612209
+   }
+  ],
+  "cckernel": [
+   {
+    "id": "math_train",
+    "ok": true,
+    "why": "last number 270",
+    "text": "60 km/h \u00d7 2.5 h = 150 km  \n80 km/h \u00d7 1.5 h = 120 km  \n150 km + 120 km = 270 km  \n\n270 km<|im_end|>",
+    "predicted_n": 55,
+    "predicted_ms": 37541.56586400018,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "math_discount",
+    "ok": true,
+    "why": "last number 22",
+    "text": "1. Discount: $25 \u00d7 0.20 = $5 off \u2192 $25 \u2212 $5 = $20\n2. Tax: $20 \u00d7 0.10 = $2 \u2192 $20 + $2 = $22\n\nFinal price: $22<|im_end|>",
+    "predicted_n": 63,
+    "predicted_ms": 42129.61004900012,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "math_mul",
+    "ok": true,
+    "why": "last number 391",
+    "text": "391<|im_end|>",
+    "predicted_n": 3,
+    "predicted_ms": 2002.5136310000562,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "code_prime",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\ndef is_prime(n):\n    if n < 2:\n        return False\n    if n == 2:\n        return True\n    if n % 2 == 0:\n        return False\n    i = 3\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i += 2\n    return True\n```<|im_end|>",
+    "predicted_n": 88,
+    "predicted_ms": 59652.14513199999,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "code_fizzbuzz",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            result.append(\"FizzBuzz\")\n        elif i % 3 == 0:\n            result.append(\"Fizz\")\n        elif i % 5 == 0:\n            result.append(\"Buzz\")\n        else:\n            result.append(str(i))\n    return result\n```<|im_end|>",
+    "predicted_n": 100,
+    "predicted_ms": 66167.07168800008,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "code_words",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\ndef reverse_words(s):\n    return \" \".join(s.split()[::-1])\n```<|im_end|>",
+    "predicted_n": 22,
+    "predicted_ms": 14818.413568000096,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "json_profile",
+    "ok": false,
+    "why": "invalid json: substring not found",
+    "text": "{\"name\": \"Ada Lovelace\",\"age\": 34,\"languages\": [\"Python\", \"C++\", \"Go\"]<|im_end|>",
+    "predicted_n": 27,
+    "predicted_ms": 18533.582295999848,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "fact_capital",
+    "ok": true,
+    "why": "Canberra",
+    "text": "Canberra<|im_end|>",
+    "predicted_n": 2,
+    "predicted_ms": 1414.1271109999707,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "fact_author",
+    "ok": true,
+    "why": "Jane Austen",
+    "text": "Jane Austen<|im_end|>",
+    "predicted_n": 3,
+    "predicted_ms": 2122.1666490000644,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "fact_gold",
+    "ok": true,
+    "why": "Au",
+    "text": "Au<|im_end|>",
+    "predicted_n": 1,
+    "predicted_ms": 687.5369150000097,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "summary",
+    "ok": true,
+    "why": "Photosynthesis is the process by which green plants, algae, and some bacteria us",
+    "text": "Photosynthesis is the process by which green plants, algae, and some bacteria use chlorophyll in chloroplasts to convert sunlight, carbon dioxide, and water into glucose and oxygen, forming the foundation of most food chains and producing Earth's atmospheric oxygen.<|im_end|>",
+    "predicted_n": 51,
+    "predicted_ms": 34442.71020300016,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "code_edit",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\nfrom typing import List, Tuple, Optional\n\n\ndef merge_intervals(intervals: List[List[int]]) -> List[Tuple[int, int]]:\n    \"\"\"Merge overlapping intervals and return them as tuples.\"\"\"\n    if not intervals:\n        return []\n    intervals = sorted(intervals, key=lambda iv: iv[0])\n    merged: List[List[int]] = [list(intervals[0])]\n    for start, end in intervals[1:]:\n        last = merged[-1]\n        if start <= last[1]:\n            last[1] = max(last[1], end)\n        else:\n            merged.append([start, end])\n    return [tuple(iv) for iv in merged]\n\n\ndef moving_average(values: List[float], window: int) -> List[float]:\n    \"\"\"Return the moving average of values using a sliding window.\"\"\"\n    if window <= 0:\n        raise ValueError(\"window must be positive\")\n    out: List[float] = []\n    total = 0.0\n    for i, v in enumerate(values):\n        total += v\n        if i >= window:\n            total -= values[i - window]\n        if i >= window - 1:\n            out.append(total / window)\n    return out\n```<|im_end|>",
+    "predicted_n": 274,
+    "predicted_ms": 184784.06184100005,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "multiturn",
+    "ok": true,
+    "why": "Hi Priya! Nice to meet you \u2014 Lyon is a lovely city.\n\n[turn 2]\nLyon.",
+    "text": "Hi Priya! Nice to meet you \u2014 Lyon is a lovely city.\n\n[turn 2]\nLyon.<|im_end|>",
+    "predicted_n": 3,
+    "predicted_ms": 2044.5106629999827,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "think_strawberry",
+    "ok": true,
+    "why": "answer states 3",
+    "text": "<think></think>The word \"strawberry\" contains the letter \"r\" 3 times.\n\nFinal answer: 3<|im_end|>",
+    "predicted_n": 25,
+    "predicted_ms": 16490.386212999965,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "think_batball",
+    "ok": true,
+    "why": "answer states 5",
+    "text": "<think>Let me think through this carefully.\n\nLet me define the variables:\n- Let B = cost of the bat\n- Let S = cost of the ball\n\nFrom the problem:\n1. B + S = 110 (cents)\n2. B = S + 100 (the bat costs $1.00 more than the ball)\n\nSubstituting equation 2 into equation 1:\n(S + 100) + S = 110\n2S + 100 = 110\n2S = 10\nS = 5\n\nSo the ball costs 5 cents.\n\nLet me verify:\n- Ball = 5 cents\n- Bat = 5 + 100 = 105 cents = $1.05\n- Total = 5 + 105 = 110 cents = $1.10 \u2713\n- Bat costs $1.00 more than ball: $1.05 - $0.05 = $1.00 \u2713\n\nThe answer is 5 cents.\n\nThis is a classic riddle where people often incorrectly answer 10 cents (thinking the ball is $0.10 and the bat is $1.00). But the correct answer is 5 cents.\n\nThe user wants the final answer as a number of cents. So I should give \"5\".\n\nLet me present this clearly.</think>Let me solve this step by step.\n\nLet's say the ball costs **x** cents.\n\nThe bat costs $1.00 more than the ball, so the bat costs **x + 100** cents.\n\nTogether they cost $1.10 = 110 cents:\n\n**x + (x + 100) = 110**\n\n2x + 100 = 110\n\n2x = 10\n\n**x = 5**\n\nSo the ball costs **5 cents**.\n\nLet me verify:\n- Ball: 5 cents\n- Bat: 5 + 100 = 105 cents ($1.05)\n- Total: 5 + 105 = 110 cents ($1.10) \u2713\n- Difference: 105 - 5 = 100 cents ($1.00) \u2713\n\n**",
+    "predicted_n": 511,
+    "predicted_ms": 337418.51013099996,
+    "tokens_per_step": 1.0
+   }
+  ],
+  "cckernel+sched": [
+   {
+    "id": "math_train",
+    "ok": true,
+    "why": "last number 270",
+    "text": "60 km/h \u00d7 2.5 h = 150 km  \n80 km/h \u00d7 1.5 h = 120 km  \n150 km + 120 km = 270 km  \n\n270 km<|im_end|>",
+    "predicted_n": 55,
+    "predicted_ms": 28873.98529400025,
+    "tokens_per_step": 1.5277777777777777
+   },
+   {
+    "id": "math_discount",
+    "ok": true,
+    "why": "last number 22",
+    "text": "1. Discount: $25 \u00d7 0.20 = $5 off \u2192 $25 \u2212 $5 = $20\n2. Tax: $20 \u00d7 0.10 = $2 \u2192 $20 + $2 = $22\n\nFinal price: $22<|im_end|>",
+    "predicted_n": 63,
+    "predicted_ms": 41602.12345899981,
+    "tokens_per_step": 1.0677966101694916
+   },
+   {
+    "id": "math_mul",
+    "ok": true,
+    "why": "last number 391",
+    "text": "391<|im_end|>",
+    "predicted_n": 3,
+    "predicted_ms": 2047.6550569997016,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "code_prime",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\ndef is_prime(n):\n    if n < 2:\n        return False\n    if n == 2:\n        return True\n    if n % 2 == 0:\n        return False\n    i = 3\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i += 2\n    return True\n```<|im_end|>",
+    "predicted_n": 88,
+    "predicted_ms": 53879.07562700002,
+    "tokens_per_step": 1.2222222222222223
+   },
+   {
+    "id": "code_fizzbuzz",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 15 == 0:\n            result.append(\"FizzBuzz\")\n        elif i % 3 == 0:\n            result.append(\"Fizz\")\n        elif i % 5 == 0:\n            result.append(\"Buzz\")\n        else:\n            result.append(str(i))\n    return result\n```<|im_end|>",
+    "predicted_n": 100,
+    "predicted_ms": 59585.66837599983,
+    "tokens_per_step": 1.2048192771084338
+   },
+   {
+    "id": "code_words",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\ndef reverse_words(s):\n    return \" \".join(s.split()[::-1])\n```<|im_end|>",
+    "predicted_n": 22,
+    "predicted_ms": 15060.18076800001,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "json_profile",
+    "ok": false,
+    "why": "invalid json: substring not found",
+    "text": "{\"name\": \"Ada Lovelace\",\"age\": 34,\"languages\": [\"Python\", \"C++\", \"Go\"]<|im_end|>",
+    "predicted_n": 27,
+    "predicted_ms": 17919.138872000076,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "fact_capital",
+    "ok": true,
+    "why": "Canberra",
+    "text": "Canberra<|im_end|>",
+    "predicted_n": 2,
+    "predicted_ms": 1299.5844249999209,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "fact_author",
+    "ok": true,
+    "why": "Jane Austen",
+    "text": "Jane Austen<|im_end|>",
+    "predicted_n": 3,
+    "predicted_ms": 1981.7088190002323,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "fact_gold",
+    "ok": true,
+    "why": "Au",
+    "text": "Au<|im_end|>",
+    "predicted_n": 1,
+    "predicted_ms": 745.4942459999074,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "summary",
+    "ok": true,
+    "why": "Photosynthesis is the process by which green plants, algae, and some bacteria us",
+    "text": "Photosynthesis is the process by which green plants, algae, and some bacteria use chlorophyll in chloroplasts to convert sunlight, carbon dioxide, and water into glucose and oxygen, forming the foundation of most food chains and producing Earth's atmospheric oxygen.<|im_end|>",
+    "predicted_n": 51,
+    "predicted_ms": 29709.59093400006,
+    "tokens_per_step": 1.5
+   },
+   {
+    "id": "code_edit",
+    "ok": true,
+    "why": "tests pass",
+    "text": "```python\nfrom typing import List, Tuple, Optional\n\n\ndef merge_intervals(intervals: List[List[int]]) -> List[Tuple[int, int]]:\n    \"\"\"Merge overlapping intervals and return them as tuples.\"\"\"\n    if not intervals:\n        return []\n    intervals = sorted(intervals, key=lambda iv: iv[0])\n    merged: List[List[int]] = [list(intervals[0])]\n    for start, end in intervals[1:]:\n        last = merged[-1]\n        if start <= last[1]:\n            last[1] = max(last[1], end)\n        else:\n            merged.append([start, end])\n    return [tuple(iv) for iv in merged]\n\n\ndef moving_average(values: List[float], window: int) -> List[float]:\n    \"\"\"Return the moving average of values using a sliding window.\"\"\"\n    if window <= 0:\n        raise ValueError(\"window must be positive\")\n    out: List[float] = []\n    total = 0.0\n    for i, v in enumerate(values):\n        total += v\n        if i >= window:\n            total -= values[i - window]\n        if i >= window - 1:\n            out.append(total / window)\n    return out\n```<|im_end|>",
+    "predicted_n": 274,
+    "predicted_ms": 107201.649568,
+    "tokens_per_step": 2.424778761061947
+   },
+   {
+    "id": "multiturn",
+    "ok": true,
+    "why": "Hi Priya! Nice to meet you \u2014 Lyon is a lovely city.\n\n[turn 2]\nLyon.",
+    "text": "Hi Priya! Nice to meet you \u2014 Lyon is a lovely city.\n\n[turn 2]\nLyon.<|im_end|>",
+    "predicted_n": 3,
+    "predicted_ms": 2160.769982999682,
+    "tokens_per_step": 1.0
+   },
+   {
+    "id": "think_strawberry",
+    "ok": true,
+    "why": "answer states 3",
+    "text": "<think></think>The word \"strawberry\" contains the letter \"r\" 3 times.\n\nFinal answer: 3<|im_end|>",
+    "predicted_n": 25,
+    "predicted_ms": 16822.845981999762,
+    "tokens_per_step": 1.0416666666666667
+   },
+   {
+    "id": "think_batball",
+    "ok": true,
+    "why": "answer states 5",
+    "text": "<think>Let me think through this carefully.\n\nLet me define the variables:\n- Let B = cost of the bat\n- Let S = cost of the ball\n\nFrom the problem:\n1. B + S = 110 (cents)\n2. B = S + 100 (the bat costs $1.00 more than the ball)\n\nSubstituting equation 2 into equation 1:\n(S + 100) + S = 110\n2S + 100 = 110\n2S = 10\nS = 5\n\nSo the ball costs 5 cents.\n\nLet me verify:\n- Ball = 5 cents\n- Bat = 5 + 100 = 105 cents = $1.05\n- Total = 5 + 105 = 110 cents = $1.10 \u2713\n- Bat costs $1.00 more than ball: $1.05 - $0.05 = $1.00 \u2713\n\nThe answer is 5 cents.\n\nThis is a classic riddle where people often incorrectly answer 10 cents (thinking the ball is $0.10 and the bat is $1.00). But the correct answer is 5 cents.\n\nThe user wants the final answer as a number of cents. So I should give \"5\".\n\nLet me present this clearly.</think>Let me solve this step by step.\n\nLet's say the ball costs **x** cents.\n\nThe bat costs $1.00 more than the ball, so the bat costs **x + 100** cents.\n\nTogether they cost $1.10 = 110 cents:\n\n**x + (x + 100) = 110**\n\n2x + 100 = 110\n\n2x = 10\n\n**x = 5**\n\nSo the ball costs **5 cents**.\n\nLet me verify:\n- Ball: 5 cents\n- Bat: 5 + 100 = 105 cents ($1.05)\n- Total: 5 + 105 = 110 cents ($1.10) \u2713\n- Difference: 105 - 5 = 100 cents ($1.00) \u2713\n\n**",
+    "predicted_n": 511,
+    "predicted_ms": 289487.52513999987,
+    "tokens_per_step": 1.3699731903485255
+   }
+  ]
+ },
+ "suite_summary": {
+  "llama.cpp": {
+   "pass": 15,
+   "prompts": 15,
+   "tokens": 990,
+   "decode_tok_s": 5.1856705779194145
+  },
+  "llama.cpp+ngram-simple": {
+   "pass": 15,
+   "prompts": 15,
+   "tokens": 990,
+   "decode_tok_s": 6.0090568140115534
+  },
+  "cckernel": {
+   "pass": 14,
+   "prompts": 15,
+   "tokens": 1228,
+   "decode_tok_s": 1.4971065271816733
+  },
+  "cckernel+sched": {
+   "pass": 14,
+   "prompts": 15,
+   "tokens": 1228,
+   "decode_tok_s": 1.8372864511176177
+  }
+ }
+}

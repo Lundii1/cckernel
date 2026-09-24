@@ -216,15 +216,19 @@ class RefModel:
     def W(self, name):
         return self.w[name]
 
+    def mm(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        """x @ W^T in the model's compute dtype (activations are cast; norms and the recurrence stay fp32)."""
+        return x.to(self.dtype) @ self.W(name).t()
+
     # -- mixers ----------------------------------------------------------------------------------
     def gdn(self, i: int, x: torch.Tensor, cache: RefCache) -> torch.Tensor:
         c, p = self.cfg, f"layers.{i}.linear_attn."
         T = x.shape[0]
         Hk, Hv, dk, dv = c.linear_num_key_heads, c.linear_num_value_heads, c.linear_key_head_dim, c.linear_value_head_dim
-        mixed = x @ self.W(p + "in_proj_qkv.weight").t()
-        z = x @ self.W(p + "in_proj_z.weight").t()
-        b = x @ self.W(p + "in_proj_b.weight").t()
-        a = x @ self.W(p + "in_proj_a.weight").t()
+        mixed = self.mm(x, p + "in_proj_qkv.weight")
+        z = self.mm(x, p + "in_proj_z.weight")
+        b = self.mm(x, p + "in_proj_b.weight")
+        a = self.mm(x, p + "in_proj_a.weight")
         convw = self.W(p + "conv1d.weight").reshape(c.gdn_conv_dim, -1)
         mixed, cache.conv[i] = causal_conv1d(mixed, convw, cache.conv.get(i))
         q, k, v = torch.split(mixed, [c.gdn_key_dim, c.gdn_key_dim, c.gdn_value_dim], dim=-1)
@@ -243,15 +247,15 @@ class RefModel:
             o, S = gdn_recurrent(q, k, v, g, beta, S0)
         cache.rec[i] = S
         o = rmsnorm_gated(o, self.W(p + "norm.weight"), z.reshape(T, Hv, dv), c.rms_norm_eps).reshape(T, -1)
-        return o @ self.W(p + "out_proj.weight").t()
+        return self.mm(o, p + "out_proj.weight")
 
     def attn(self, i: int, x: torch.Tensor, cache: RefCache, positions: torch.Tensor) -> torch.Tensor:
         c, p = self.cfg, f"layers.{i}.self_attn."
         T, H, Hkv, D = x.shape[0], c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        qg = (x @ self.W(p + "q_proj.weight").t()).reshape(T, H, 2 * D)
+        qg = (self.mm(x, p + "q_proj.weight")).reshape(T, H, 2 * D)
         q, gate = qg[..., :D], qg[..., D:].reshape(T, H * D)
-        k = (x @ self.W(p + "k_proj.weight").t()).reshape(T, Hkv, D)
-        v = (x @ self.W(p + "v_proj.weight").t()).reshape(T, Hkv, D)
+        k = (self.mm(x, p + "k_proj.weight")).reshape(T, Hkv, D)
+        v = _f(self.mm(x, p + "v_proj.weight")).reshape(T, Hkv, D)
         q = rmsnorm_zc(q, self.W(p + "q_norm.weight"), c.rms_norm_eps)
         k = rmsnorm_zc(k, self.W(p + "k_norm.weight"), c.rms_norm_eps)
         cos, sin = rope_cos_sin(positions, c.rotary_dim, c.rope_theta)
@@ -267,14 +271,12 @@ class RefModel:
         kpos = torch.arange(S_len)[None, :]
         scores = scores.masked_fill((kpos > qpos)[None], float("-inf"))
         o = torch.einsum("hts,shd->thd", scores.softmax(-1), Vr).reshape(T, H * D)
-        o = o * torch.sigmoid(gate)
-        return o @ self.W(p + "o_proj.weight").t()
+        o = o * torch.sigmoid(_f(gate))
+        return self.mm(o, p + "o_proj.weight")
 
     def mlp(self, i: int, x: torch.Tensor) -> torch.Tensor:
         p = f"layers.{i}.mlp."
-        return (F.silu(x @ self.W(p + "gate_proj.weight").t()) * (x @ self.W(p + "up_proj.weight").t())) @ self.W(
-            p + "down_proj.weight"
-        ).t()
+        return self.mm(F.silu(self.mm(x, p + "gate_proj.weight")) * self.mm(x, p + "up_proj.weight"), p + "down_proj.weight")
 
     # -- forward ---------------------------------------------------------------------------------
     @torch.no_grad()
@@ -294,7 +296,7 @@ class RefModel:
             h = h + self.mlp(i, x)
         cache.pos += T
         hn = rmsnorm_zc(h, self.W("norm.weight"), c.rms_norm_eps).to(self.dtype)
-        logits = hn @ self.W("lm_head.weight").t()
+        logits = self.mm(hn, "lm_head.weight")
         return (logits, h) if return_hidden else logits
 
 
