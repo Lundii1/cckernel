@@ -149,3 +149,27 @@ def test_quantize_stream_remote_equals_local(tmp_path):
             assert (outs[0] / f).read_bytes() == (outs[1] / f).read_bytes(), f
     finally:
         httpd.shutdown()
+
+
+def test_quantize_stream_resume_after_crash(tmp_path):
+    import os
+
+    src = tmp_path / "hf"
+    src.mkdir()
+    _fake_hf(src, _stream_cfg())
+    base = [sys.executable, str(ROOT / "tools/quantize_stream.py"), "--model", str(src), "--device", "cpu",
+            "--clip-grid", "3", "--eval-tokens", "16"]
+    r = subprocess.run(base + ["--out", str(tmp_path / "full")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    env = dict(os.environ, CCK_TEST_CRASH_AT="1")
+    r = subprocess.run(base + ["--out", str(tmp_path / "res")], capture_output=True, text=True, env=env)
+    assert r.returncode == 3 and (tmp_path / "res" / "resume.pt").exists()
+    r = subprocess.run(base + ["--out", str(tmp_path / "res")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "resuming at layer 2" in r.stdout
+    assert not (tmp_path / "res" / "resume.pt").exists()
+    for f in sorted(p.name for p in (tmp_path / "full").glob("*.safetensors")):
+        assert (tmp_path / "full" / f).read_bytes() == (tmp_path / "res" / f).read_bytes(), f
+    a = json.loads((tmp_path / "full" / "quality_report.json").read_text())["summary"]
+    b = json.loads((tmp_path / "res" / "quality_report.json").read_text())["summary"]
+    assert abs(a["kl_mean"] - b["kl_mean"]) < 1e-9 and a["top1_agreement"] == b["top1_agreement"]

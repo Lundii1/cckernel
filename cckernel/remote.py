@@ -11,6 +11,7 @@ Interface mirrors ``cckernel.loader.Checkpoint``: ``keys()``, ``get(name)``, ``g
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import struct
@@ -80,7 +81,7 @@ class RemoteCheckpoint:
                 if e.code in (401, 403, 404):
                     raise
                 err = e
-            except (urllib.error.URLError, IOError, TimeoutError, ConnectionError) as e:
+            except (http.client.HTTPException, OSError) as e:  # IncompleteRead, resets, timeouts, URLError
                 err = e
             time.sleep(min(30.0, 2.0 ** attempt))
         raise IOError(f"failed to fetch {fname} {rng}: {err}")

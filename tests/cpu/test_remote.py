@@ -15,6 +15,7 @@ from cckernel.remote import RangeUnsupported, RemoteCheckpoint
 
 class RangeHandler(SimpleHTTPRequestHandler):
     ranges = True
+    truncate_next = 0  # number of upcoming ranged responses to cut short (IncompleteRead on the client)
 
     def log_message(self, *a):
         pass
@@ -46,6 +47,11 @@ class RangeHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        if rng and RangeHandler.truncate_next > 0 and len(body) > 16:
+            RangeHandler.truncate_next -= 1
+            self.wfile.write(body[: len(body) // 2])
+            self.close_connection = True
+            return
         self.wfile.write(body)
 
 
@@ -70,6 +76,7 @@ def server(tmp_path):
     yield f"http://127.0.0.1:{httpd.server_address[1]}", tmp_path
     httpd.shutdown()
     RangeHandler.ranges = True
+    RangeHandler.truncate_next = 0
 
 
 def test_remote_matches_local(server):
@@ -96,3 +103,12 @@ def test_remote_detects_missing_range_support(server):
     RangeHandler.ranges = False
     with pytest.raises(RangeUnsupported):
         RemoteCheckpoint("org/model", endpoint=url).get("norm.weight")
+
+
+def test_remote_retries_truncated_transfer(server):
+    url, path = server
+    rc = RemoteCheckpoint("org/model", endpoint=url, part_bytes=4096, workers=2)
+    RangeHandler.truncate_next = 3
+    t = rc.get("embed_tokens.weight", dtype=None)
+    assert torch.equal(t, Checkpoint(path).get("embed_tokens.weight", dtype=None))
+    assert RangeHandler.truncate_next == 0

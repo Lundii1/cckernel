@@ -145,6 +145,7 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--threads", type=int, default=0, help="torch CPU threads (0 = default)")
     ap.add_argument("--upload", default=os.environ.get("CCK_UPLOAD_REPO"), help="Hub repo to upload the result to")
+    ap.add_argument("--no-resume", action="store_true", help="ignore a resume.pt checkpoint in --out")
     args = ap.parse_args()
     if args.threads:
         torch.set_num_threads(args.threads)
@@ -167,28 +168,43 @@ def main():
     log(f"{cfg.num_hidden_layers} layers, vocab {cfg.vocab_size}; eval: {[len(s) for s in seqs]} tokens; device {dev}")
 
     # ---- embedding (rotated, streamed) + eval rows for both forwards
+    resume_path = out / "resume.pt"
+    state = None
+    if resume_path.exists() and not args.no_resume:
+        state = torch.load(resume_path, weights_only=False)
+        if state.get("seed") != args.seed or state.get("bits") != bits:
+            log("resume.pt was written with other settings; starting over")
+            state = None
+        else:
+            seqs = state["seqs"]
     need = sorted({t for s in seqs for t in s})
     rows_raw: dict[int, torch.Tensor] = {}
 
     def grab(r0, r1, raw):
-        for t in need:
-            if r0 <= t < r1:
-                rows_raw[t] = raw[t - r0].float().cpu()
+        if state is None:
+            for t in need:
+                if r0 <= t < r1:
+                    rows_raw[t] = raw[t - r0].float().cpu()
 
     with torch.no_grad():
         emb = rotate_embedding(cfg, lambda n, a, b: ck.get_rows(n, a, b, dtype=None), signs_d, dev, on_chunk=grab)
-    h_ref = [torch.stack([rows_raw[t] for t in s]) for s in seqs]
-    h_q = [emb[torch.tensor(s)].float() for s in seqs]  # the engine uses the bf16 rotated embedding
+    if state is None:
+        h_ref = [torch.stack([rows_raw[t] for t in s]) for s in seqs]
+        h_q = [emb[torch.tensor(s)].float() for s in seqs]  # the engine uses the bf16 rotated embedding
+        stats, total, layer_err, first = {}, 0, [], 0
+    else:
+        h_ref, h_q, stats, total, layer_err, first = (state[k] for k in ("h_ref", "h_q", "stats", "total", "layer_err",
+                                                                        "next_layer"))
+        log(f"resuming at layer {first} (layers 0..{first - 1} already written)")
     log(f"embedding rotated ({emb.numel() * 2 / 2**30:.2f} GiB bf16) [{time.time() - t0:.0f}s]")
 
     # ---- layer-major pass with prefetch of the next layer
     eps = cfg.rms_norm_eps
     keys_of = lambda i: [k for k in ck.keys() if k.startswith(f"layers.{i}.")]  # noqa: E731
     fetch = lambda i: {k: ck.get(k, dtype=None) for k in keys_of(i)}  # noqa: E731
-    stats, total, layer_err = {}, 0, []
     pool = ThreadPoolExecutor(1)
-    nxt = pool.submit(fetch, 0)
-    for i in range(cfg.num_hidden_layers):
+    nxt = pool.submit(fetch, first) if first < cfg.num_hidden_layers else None
+    for i in range(first, cfg.num_hidden_layers):
         tl = time.time()
         wl = nxt.result()
         if i + 1 < cfg.num_hidden_layers:
@@ -230,6 +246,10 @@ def main():
                 errs.append(float((back - h_ref[j]).norm() / h_ref[j].norm()))
             layer_err.append(errs)
         wl = ref = fm = ft = parts = None  # free the layer before the next one arrives
+        torch.save({"next_layer": i + 1, "h_ref": h_ref, "h_q": h_q, "stats": stats, "total": total,
+                    "layer_err": layer_err, "seqs": seqs, "seed": args.seed, "bits": bits}, resume_path)
+        if os.environ.get("CCK_TEST_CRASH_AT") == str(i):  # test hook: simulate a crash after layer i
+            raise SystemExit(3)
         log(f"layer {i:2d} {cfg.layer_types[i]:17s} t2="
             + ",".join(f"{stats[n]['t2']:.1e}" for n in stats if n.startswith(p))
             + f"  resid err {', '.join(f'{e:.2e}' for e in errs)}  [{time.time() - tl:.0f}s / {time.time() - t0:.0f}s]")
@@ -297,6 +317,7 @@ def main():
                               "quality": report["summary"]})
     (out / "cck_manifest.json").write_text(json.dumps(manifest, indent=1))
     shutil.rmtree(out / ".tmp", ignore_errors=True)
+    resume_path.unlink(missing_ok=True)
     sm = report["summary"]
     log(f"done: weights {sm['weights_gib']:.2f} GiB + embedding {sm['embed_gib']:.2f} GiB | KL mean {sm['kl_mean']:.2e} "
         f"max {sm['kl_max']:.2e} | top-1 agreement {sm['top1_agreement'] * 100:.2f}% | ppl {sm['ppl_ref']:.3f} -> "
