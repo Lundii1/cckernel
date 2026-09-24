@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "torch>=2.5"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cckernel"
+version = "0.1.0"
+description = "Research-derived CUDA kernels for MiMo-V2.6-Distill-Qwen-9B (Qwen3.5 hybrid Gated DeltaNet) on RTX 40xx"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.5", "safetensors>=0.4", "numpy"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+hf = ["transformers>=5.12", "tokenizers"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
