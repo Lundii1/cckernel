@@ -34,7 +34,7 @@ class RangeUnsupported(RuntimeError):
 
 class RemoteCheckpoint:
     def __init__(self, repo: str, revision: str = "main", token: str | None = None,
-                 endpoint: str = "https://huggingface.co", part_bytes: int = 64 << 20, workers: int = 8,
+                 endpoint: str = "https://huggingface.co", part_bytes: int = 16 << 20, workers: int = 8,
                  retries: int = 6, timeout: float = 120.0):
         self.repo, self.revision = repo, revision
         self.endpoint = endpoint.rstrip("/")
