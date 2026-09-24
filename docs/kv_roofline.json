@@ -1,0 +1,127 @@
+{
+ "bandwidth": 288000000000.0,
+ "efficiency": 0.8,
+ "vram_gib": 15.5,
+ "table": {
+  "bf16": {
+   "kv_bytes_per_token": 32768,
+   "rows": {
+    "4096": {
+     "bytes_per_step": 8294498304,
+     "tok_s": 27.77744856357258,
+     "vram_gib": 10.372509765625,
+     "fits": true
+    },
+    "32768": {
+     "bytes_per_step": 9234022400,
+     "tok_s": 24.951206529453515,
+     "vram_gib": 11.247509765625,
+     "fits": true
+    },
+    "131072": {
+     "bytes_per_step": 12455247872,
+     "tok_s": 18.49822680108602,
+     "vram_gib": 14.247509765625,
+     "fits": true
+    },
+    "262144": {
+     "bytes_per_step": 16750215168,
+     "tok_s": 13.755047185313865,
+     "vram_gib": 18.247509765625,
+     "fits": false
+    }
+   },
+   "max_context": 172113
+  },
+  "fp8": {
+   "kv_bytes_per_token": 16384,
+   "rows": {
+    "4096": {
+     "bytes_per_step": 8227389440,
+     "tok_s": 28.004022622271787,
+     "vram_gib": 10.310009765625,
+     "fits": true
+    },
+    "32768": {
+     "bytes_per_step": 8697151488,
+     "tok_s": 26.4914323175694,
+     "vram_gib": 10.747509765625,
+     "fits": true
+    },
+    "131072": {
+     "bytes_per_step": 10307764224,
+     "tok_s": 22.3520828564889,
+     "vram_gib": 12.247509765625,
+     "fits": true
+    },
+    "262144": {
+     "bytes_per_step": 12455247872,
+     "tok_s": 18.49822680108602,
+     "vram_gib": 14.247509765625,
+     "fits": true
+    }
+   },
+   "max_context": 262144
+  },
+  "k8v4": {
+   "kv_bytes_per_token": 12800,
+   "rows": {
+    "4096": {
+     "bytes_per_step": 8212709376,
+     "tok_s": 28.054079287561045,
+     "vram_gib": 10.296337890625,
+     "fits": true
+    },
+    "32768": {
+     "bytes_per_step": 8579710976,
+     "tok_s": 26.85405145283999,
+     "vram_gib": 10.638134765625,
+     "fits": true
+    },
+    "131072": {
+     "bytes_per_step": 9838002176,
+     "tok_s": 23.419389005835487,
+     "vram_gib": 11.810009765625,
+     "fits": true
+    },
+    "262144": {
+     "bytes_per_step": 11515723776,
+     "tok_s": 20.00742675681213,
+     "vram_gib": 13.372509765625,
+     "fits": true
+    }
+   },
+   "max_context": 262144
+  },
+  "fp4": {
+   "kv_bytes_per_token": 9216,
+   "rows": {
+    "4096": {
+     "bytes_per_step": 8198029312,
+     "tok_s": 28.10431522399514,
+     "vram_gib": 10.282666015625,
+     "fits": true
+    },
+    "32768": {
+     "bytes_per_step": 8462270464,
+     "tok_s": 27.226735541030326,
+     "vram_gib": 10.528759765625,
+     "fits": true
+    },
+    "131072": {
+     "bytes_per_step": 9368240128,
+     "tok_s": 24.59373338556678,
+     "vram_gib": 11.372509765625,
+     "fits": true
+    },
+    "262144": {
+     "bytes_per_step": 10576199680,
+     "tok_s": 21.784762671954393,
+     "vram_gib": 12.497509765625,
+     "fits": true
+    }
+   },
+   "max_context": 262144
+  }
+ }
+}

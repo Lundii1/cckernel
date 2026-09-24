@@ -145,31 +145,50 @@ def cmd_reference(args):
 
 
 # ------------------------------------------------------------------------------------------ scoring
-def metrics_for(ref, j: int, lp: torch.Tensor, start: int) -> dict:
-    """Per-position metrics for positions [start, start+len(lp)) of sequence j (lp: log-probs)."""
-    o = ref["offs"][j] + start
-    n = lp.shape[0]
-    lse, topv, topi = ref["lse"][o:o + n], ref["topv"][o:o + n], ref["topi"][o:o + n].long()
-    lr = topv - lse[:, None]  # reference log-probs of its top-128
-    pr = lr.exp()
+def _kl_topk(topv_lp, topi, lp):
+    """KL(p || q) with p given by its top-k log-probs (+ one bucket for the rest), q full log-probs."""
+    pr = topv_lp.exp()
     lq = lp.gather(1, topi)
     pr_tail = (1 - pr.sum(-1)).clamp_min(1e-12)
     pq_tail = (1 - lq.exp().sum(-1)).clamp_min(1e-12)
-    kl = (pr * (lr - lq)).sum(-1) + pr_tail * (pr_tail.log() - pq_tail.log())
+    return (pr * (topv_lp - lq)).sum(-1) + pr_tail * (pr_tail.log() - pq_tail.log()), pr_tail
+
+
+def metrics_for(ref, j: int, lp: torch.Tensor, start: int, base: dict | None = None) -> dict:
+    """Per-position metrics for positions [start, start+len(lp)) of sequence j (lp: log-probs).
+    ``base``: compact top-k log-probs of the bf16-KV engine run (KL of this variant against it)."""
+    o = ref["offs"][j] + start
+    n = lp.shape[0]
+    lse, topv, topi = ref["lse"][o:o + n], ref["topv"][o:o + n], ref["topi"][o:o + n].long()
+    kl, pr_tail = _kl_topk(topv - lse[:, None], topi, lp)
     agree = (lp.argmax(-1) == topi[:, 0]).float()
     nx = ref["next"][o:o + n]
     valid = nx >= 0
     nll_q = -lp[valid].gather(1, nx[valid][:, None])[:, 0]
     nll_r = -(ref["true_logit"][o:o + n][valid] - lse[valid])
-    return {"kl": kl, "agree": agree, "nll_q": nll_q, "nll_r": nll_r, "tail": pr_tail}
+    m = {"kl": kl, "agree": agree, "nll_q": nll_q, "nll_r": nll_r, "tail": pr_tail, "pos": torch.arange(o, o + n)}
+    if base is not None:
+        m["kl_base"] = _kl_topk(base["topv"][o:o + n], base["topi"][o:o + n].long(), lp)[0]
+        m["agree_base"] = (lp.argmax(-1) == base["topi"][o:o + n, 0].long()).float()
+    return m
 
 
-def summarize(parts: list[dict]) -> dict:
+def summarize(parts: list[dict], unstable: torch.Tensor | None = None) -> dict:
+    """``unstable``: bool mask over global positions where the bf16-KV engine itself disagrees sharply with
+    the reference (KL > 0.5: knife-edge copy decisions in repetitive text); reported separately."""
     cat = {k: torch.cat([p[k] for p in parts]) for k in parts[0]}
-    return {"tokens": int(cat["kl"].numel()), "kl_mean": float(cat["kl"].mean()), "kl_p99": float(cat["kl"].quantile(0.99)),
-            "kl_max": float(cat["kl"].max()), "top1_agreement": float(cat["agree"].mean()),
-            "ppl_ref": float(cat["nll_r"].mean().exp()), "ppl_quant": float(cat["nll_q"].mean().exp()),
-            "ref_tail_mass_mean": float(cat["tail"].mean())}
+    out = {"tokens": int(cat["kl"].numel()), "kl_mean": float(cat["kl"].mean()), "kl_median": float(cat["kl"].median()),
+           "kl_p99": float(cat["kl"].quantile(0.99)), "kl_max": float(cat["kl"].max()),
+           "top1_agreement": float(cat["agree"].mean()), "ppl_ref": float(cat["nll_r"].mean().exp()),
+           "ppl_quant": float(cat["nll_q"].mean().exp()), "ref_tail_mass_mean": float(cat["tail"].mean())}
+    if unstable is not None:
+        st = ~unstable[cat["pos"]]
+        out.update({"stable_tokens": int(st.sum()), "kl_mean_stable": float(cat["kl"][st].mean()),
+                    "top1_agreement_stable": float(cat["agree"][st].mean())})
+    if "kl_base" in cat:
+        out.update({"kl_vs_bf16kv_mean": float(cat["kl_base"].mean()), "kl_vs_bf16kv_p99": float(cat["kl_base"].quantile(0.99)),
+                    "top1_vs_bf16kv": float(cat["agree_base"].mean())})
+    return out
 
 
 VARIANTS = {"bf16": ("bf16", False), "fp8": ("fp8", True), "k8v4": ("k8v4", True), "fp4": ("fp4", True),
@@ -188,7 +207,10 @@ def cmd_score(args):
            "variants": {}}
     if Path(args.out).exists():
         out = json.loads(Path(args.out).read_text())
-    for name in args.variants:
+    base_path = Path(args.out).with_suffix(".base_bf16kv.pt")
+    base = torch.load(base_path, weights_only=False) if base_path.exists() else None
+    order = (["bf16"] if "bf16" in args.variants else []) + [v for v in args.variants if v != "bf16"]
+    for name in order:
         if name in out["variants"] and not args.force:
             log(f"{name}: already scored, skipping")
             continue
@@ -197,21 +219,36 @@ def cmd_score(args):
         kvq.STATS = {}
         t0 = time.time()
         per_seq = []
+        keep = {"topv": torch.zeros(ref["lse"].numel(), TOPK), "topi": torch.zeros(ref["lse"].numel(), TOPK, dtype=torch.int32)}
+
+        def fn(st, lp, j, parts):
+            parts.append(metrics_for(ref, j, lp, st, base if name != "bf16" else None))
+            if name == "bf16":
+                o = ref["offs"][j] + st
+                tv, ti = lp.topk(TOPK, dim=-1)
+                keep["topv"][o:o + lp.shape[0]], keep["topi"][o:o + lp.shape[0]] = tv, ti.to(torch.int32)
+
         for j, s in enumerate(seqs):
             parts = []
-            eng.score(s, fn=lambda st, lp, j=j, parts=parts: parts.append(metrics_for(ref, j, lp, st)))
+            eng.score(s, fn=lambda st, lp, j=j, parts=parts: fn(st, lp, j, parts))
             per_seq.append(parts)
+        if name == "bf16":
+            kl_all = torch.cat([p["kl"] for ps in per_seq for p in ps])
+            base = {**keep, "unstable": kl_all > 0.5}
+            torch.save(base, base_path)
+        unstable = base["unstable"] if base is not None else None
         res = {}
         for set_name, idx in ref["sets"].items():
-            res[set_name] = summarize([p for j in idx for p in per_seq[j]])
-        res["all"] = summarize([p for ps in per_seq for p in ps])
+            res[set_name] = summarize([p for j in idx for p in per_seq[j]], unstable)
+        res["all"] = summarize([p for ps in per_seq for p in ps], unstable)
         res["kv_bytes_per_token"] = eng.kv_bytes_per_token()
         res["max_abs_written"] = {("bf16", "fp8", "fp4")[k]: v for k, v in kvq.STATS.items()}
         res["seconds"] = time.time() - t0
         kvq.STATS = None
         out["variants"][name] = res
         log(f"{name:10s} " + " | ".join(
-            f"{k}: KL {v['kl_mean']:.2e} top1 {v['top1_agreement'] * 100:.2f}% ppl {v['ppl_ref']:.3f}->{v['ppl_quant']:.3f}"
+            f"{k}: KL {v['kl_mean']:.2e} (stable {v.get('kl_mean_stable', float('nan')):.2e}, vs bf16kv "
+            f"{v.get('kl_vs_bf16kv_mean', 0.0):.2e}) top1 {v['top1_agreement'] * 100:.2f}% ppl {v['ppl_ref']:.3f}->{v['ppl_quant']:.3f}"
             for k, v in res.items() if isinstance(v, dict) and "kl_mean" in v) + f"  [{res['seconds']:.0f}s]")
         Path(args.out).write_text(json.dumps(out, indent=1))
     log(f"written {args.out}")

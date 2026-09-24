@@ -18,7 +18,7 @@ from typing import Callable
 
 import torch
 
-from . import quant
+from . import kvq, quant
 from .config import TextConfig
 from .hadamard import random_signs
 
@@ -98,6 +98,8 @@ def manifest_dict(cfg: TextConfig, bits, seed, stats, total, extra=None) -> dict
         "stats": stats,
         "quantized_weight_bytes": total,
         "embed_bytes": cfg.vocab_size * cfg.hidden_size * 2,
+        # runtime defaults read by the engine (overridable per run: Engine(kv_format=...), generate --kv)
+        "runtime": {"kv_cache": kvq.DEFAULT_KV, "kv_rotate_seed": kvq.KV_SEED, "spec_policy": "sched"},
     }
     m.update(extra or {})
     return m

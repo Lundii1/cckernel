@@ -111,7 +111,15 @@ class Engine:
         self.cfg = cfg = TextConfig.from_dict(man["config"])
         self.dev = torch.device(device)
         runtime = man.get("runtime", {})
-        self.kv_format = kv_format or os.environ.get("CCK_KV") or runtime.get("kv_cache", "bf16")
+        self.kv_requested = kv_format or os.environ.get("CCK_KV") or runtime.get("kv_cache", "bf16")
+        if self.kv_requested == "auto":
+            free = None
+            if self.dev.type == "cuda":  # what is left once the weights (loaded below) and ~0.8 GiB of buffers are in
+                free = torch.cuda.mem_get_info(self.dev)[0] - man["quantized_weight_bytes"] - man["embed_bytes"] - 0.8 * 2**30
+            self.kv_format = kvq.auto_format(max_len, len(cfg.attn_layers), cfg.num_key_value_heads, cfg.head_dim,
+                                             man["quantized_weight_bytes"], free)
+        else:
+            self.kv_format = self.kv_requested
         self.kfmt, self.vfmt = kvq.KV_FORMATS[self.kv_format]
         self.kv_rotate = (self.kv_format != "bf16") if kv_rotate is None else kv_rotate
         self.kv_signs = kvq.kv_signs(runtime.get("kv_rotate_seed", kvq.KV_SEED), cfg.head_dim).to(self.dev)
@@ -412,12 +420,14 @@ class Engine:
                 self.cur_len.fill_(ctx)
                 self.n_commit.zero_()
                 self.step([0] * M)  # warm up / capture the graph
-                self._sync()
-                t0 = time.perf_counter()
-                for _ in range(reps):
+                ts = []
+                for _ in range(reps):  # fastest repetition: robust to interference from other processes
+                    self._sync()
+                    t0 = time.perf_counter()
                     self.step([0] * M)
-                self._sync()
-                t = (time.perf_counter() - t0) / reps
+                    self._sync()
+                    ts.append(time.perf_counter() - t0)
+                t = min(ts)
                 rows.append([1.0, M, M * ctx])
                 ys.append(t)
                 samples.append({"ctx": ctx, "M": M, "s": t})

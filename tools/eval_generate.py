@@ -162,10 +162,16 @@ def degeneration(ids: list[int]) -> dict:
 def check(p: dict, text: str) -> tuple[bool, str]:
     ans = final_answer(text)
     k = p["kind"]
-    if k in ("math", "think"):
+    if k == "math":  # the prompt asks for the final number on the last line
         nums = re.findall(r"-?\d+(?:\.\d+)?", ans.replace(",", ""))
         ok = bool(nums) and float(nums[-1]) == float(p["answer"])
         return ok, f"last number {nums[-1] if nums else None}"
+    if k == "think":  # reasoning mode: the answer after </think> states the expected number
+        if "</think>" not in text:
+            return False, "no answer after the reasoning (token cap)"
+        nums = re.findall(r"(?<![\d.$])\d+(?![\d.])", ans.replace(",", ""))
+        ok = p["answer"] in nums
+        return ok, f"answer states {p['answer']}" if ok else f"numbers in answer: {nums[:6]}"
     if k in ("code", "edit"):
         code = code_block(ans)
         try:
@@ -221,7 +227,7 @@ def run_prompts(eng, tok, eos, policy, cost, prompts, pc_dir):
             text = tok.decode(out, skip_special_tokens=False)
         ok, why = check(p, text)
         r = {"id": p["id"], "kind": p["kind"], "ok": ok, "why": why, "text": text, "prompt_ids": ids, "out_ids": out,
-             "stats": st, "wall_s": time.perf_counter() - t0, **degeneration(out)}
+             "stats": st, "wall_s": time.perf_counter() - t0, "truncated": out[-1] not in eos, **degeneration(out)}
         log(f"  {p['id']:17s} {'PASS' if ok else 'FAIL'}  {len(out):4d} tok  {st['decode_tok_s']:.2f} tok/s  "
             f"{st['tokens_per_step']:.2f} tok/step  {why[:60]!r}")
         res.append(r)
@@ -266,6 +272,55 @@ def replay_table(runs: dict, costs: dict) -> dict:
     return table
 
 
+def do_replay(result: dict, manifest: dict):
+    """Exact replay of all policies on the recorded outputs under the measured step costs of this machine
+    and the RTX 4060 Ti bandwidth model (short context, and a 32K-token session in front)."""
+    from cckernel import kvq
+    from cckernel.config import TextConfig
+
+    cfg = TextConfig.from_dict(manifest["config"])
+    w = manifest["quantized_weight_bytes"]
+    costs = {}
+    for key, prof in result["profiles"].items():
+        costs[f"measured {key}"] = (StepCost.from_profile(prof), 0)
+    for kv in ("bf16", "fp4"):
+        kvb = kvq.kv_bytes_per_token(kv, len(cfg.attn_layers), cfg.num_key_value_heads, cfg.head_dim)
+        rc = StepCost.roofline(w, kvb)
+        costs[f"4060Ti model {kv} short ctx"] = (rc, 0)
+        costs[f"4060Ti model {kv} +32K ctx"] = (rc, 32768)
+    result["replay"] = replay_table(result["runs"], costs)
+    for k, v in result["replay"].items():
+        base = v["none"]["tok_per_s"]
+        log(f"{k:45s} " + "  ".join(f"{p}: {x['tokens_per_step']:.2f} tok/step x{x['tok_per_s'] / base:.2f}"
+                                     for p, x in v.items()))
+
+
+def write_samples(result: dict, samples: str | None):
+    if not samples:
+        return
+    sd = Path(samples)
+    sd.mkdir(parents=True, exist_ok=True)
+    for cfgname, res in result["runs"].items():
+        lines = [f"# Samples: {cfgname}\n", "Greedy decoding, chat template, thinking off unless noted. Generated on CPU by "
+                 "tools/eval_generate.py with the cckernel engine (INT8 weights).\n"]
+        for r in res:
+            p = next(x for x in PROMPTS if x["id"] == r["id"])
+            q = p.get("prompt") or "\n\n".join(p["turns"])
+            lines += [f"## {r['id']} — {'PASS' if r['ok'] else 'FAIL'} ({r['why'][:80]})\n",
+                      "**Prompt:**\n", "````text\n" + q.strip() + "\n````\n", "**Output:**\n",
+                      "````text\n" + r["text"].strip() + "\n````\n"]
+        (sd / f"{cfgname.replace(':', '_')}.md").write_text("\n".join(lines))
+    needle = result.get("needle", {})
+    if needle:
+        lines = ["# Needle in a haystack\n", f"Passphrase inserted at 10/50/90% depth of WikiText-2 prose. {NEEDLE}\n",
+                 "| KV format | depth | prompt tokens | found | answer |", "|---|---|---|---|---|"]
+        for kv, rows in needle.items():
+            for x in rows:
+                lines.append(f"| {kv} | {x['depth']:.0%} | {x['prompt_tokens']} | {'yes' if x['ok'] else 'no'} | "
+                             f"{x['answer'][:60]} |")
+        (sd / "needle.md").write_text("\n".join(lines) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True)
@@ -276,8 +331,26 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", required=True)
     ap.add_argument("--samples", default=None, help="directory for markdown transcripts")
+    ap.add_argument("--recheck", action="store_true", help="re-apply the checks to saved outputs and rewrite samples")
+    ap.add_argument("--replay-only", action="store_true", help="recompute the policy replay tables from saved outputs")
     args = ap.parse_args()
     torch.set_grad_enabled(False)
+    if args.replay_only:
+        result = json.loads(Path(args.out).read_text())
+        do_replay(result, json.loads((Path(args.model) / "cck_manifest.json").read_text()))
+        Path(args.out).write_text(json.dumps(result, indent=1))
+        return
+    if args.recheck:
+        result = json.loads(Path(args.out).read_text())
+        for res in result["runs"].values():
+            for r in res:
+                p = next(x for x in PROMPTS if x["id"] == r["id"])
+                r["ok"], r["why"] = check(p, r["text"])
+        Path(args.out).write_text(json.dumps(result, indent=1))
+        write_samples(result, args.samples)
+        for name, res in result["runs"].items():
+            log(f"{name}: {sum(r['ok'] for r in res)}/{len(res)} pass " + " ".join(r["id"] for r in res if not r["ok"]))
+        return
 
     from transformers import AutoTokenizer
 
@@ -324,33 +397,10 @@ def main():
             result["needle"][kv] = needle(eng, tok, eos, [0.1, 0.5, 0.9], args.needle_tokens, prose)
             outp.write_text(json.dumps(result, indent=1))
 
-    # exact replay of all policies on the recorded outputs
-    w = sum(q.nbytes() for q in eng.lin.values())
-    costs = {}
-    for key, prof in result["profiles"].items():
-        costs[f"measured {key}"] = (StepCost.from_profile(prof), 0)
-    for kv in ("bf16", "fp4"):
-        from cckernel import kvq
-
-        kvb = kvq.kv_bytes_per_token(kv, len(eng.cfg.attn_layers), eng.cfg.num_key_value_heads, eng.cfg.head_dim)
-        rc = StepCost.roofline(w, kvb)
-        costs[f"4060Ti model {kv} short ctx"] = (rc, 0)
-        costs[f"4060Ti model {kv} +32K ctx"] = (rc, 32768)
-    result["replay"] = replay_table({k: v for k, v in result["runs"].items()}, costs)
+    do_replay(result, eng.manifest)
     outp.write_text(json.dumps(result, indent=1))
 
-    if args.samples:
-        sd = Path(args.samples)
-        sd.mkdir(parents=True, exist_ok=True)
-        for cfgname, res in result["runs"].items():
-            lines = [f"# Samples: {cfgname}\n", "Greedy decoding, chat template, thinking off unless noted.\n"]
-            for r in res:
-                p = next(x for x in PROMPTS if x["id"] == r["id"])
-                q = p.get("prompt") or "\n\n".join(p["turns"])
-                lines += [f"## {r['id']} — {'PASS' if r['ok'] else 'FAIL'} ({r['why'][:80]})\n",
-                          "**Prompt:**\n", "```text\n" + q.strip() + "\n```\n", "**Output:**\n",
-                          "```text\n" + r["text"].strip() + "\n```\n"]
-            (sd / f"{cfgname.replace(':', '_')}.md").write_text("\n".join(lines))
+    write_samples(result, args.samples)
     log(f"written {outp}")
 
 

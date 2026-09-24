@@ -180,34 +180,46 @@ class SpecPolicy:
     """Per-step drafting decision shared by generation and the exact replay simulator.
 
     kind: "sched" (confidence-scheduled, default), "ewma" (original heuristic), "fixed" (always the
-    longest draft), "none" (no speculation)."""
+    longest draft), "none" (no speculation).
+
+    The confidence model learns in hindsight from *every* proposed draft, verified or not: once the
+    tokens at the draft's positions have been emitted, draft token j counts as accepted iff it and all
+    earlier draft tokens equal what was emitted. That is exactly the verification outcome under greedy
+    decoding (and has the acceptance probability p(d) under sampling), so the scheduler cannot lock
+    itself out after a run of misses, and it only ever reads the past (exactness is preserved)."""
 
     def __init__(self, kind: str = "sched", cost: StepCost | None = None, max_draft: int = 7, max_n: int = 4):
         self.kind = kind
         self.cost = cost or StepCost(1.0, 0.03, 0.0)
         self.drafter = NGramDrafter(max_n=max_n, max_draft=max_draft)
         self.conf = ConfidenceModel()
-        self._feats: list[tuple[int, int]] = []
-        self._a: list[float] = []
+        self._pending: list[tuple[int, list[int], list[tuple[int, int]], list[float]]] = []
         self.calib: list[tuple[float, float]] = []  # (predicted survival, observed) for ECE
         self.stats = {"steps": 0, "drafted_verified": 0, "accepted": 0, "proposed": 0}
 
     def reset(self, tokens: list[int]):
         self.drafter.reset(tokens)
+        self._pending = []
 
     def plan(self, ctx: int) -> list[int]:
         if self.kind == "none":
             return []
         draft, feats = self.drafter.propose_full()
+        if not draft:
+            return []
         self.stats["proposed"] += len(draft)
+        conf = self.conf.conf(feats)
         if self.kind == "ewma":
             l_ = min(len(draft), self.drafter.draft_len())
-            a = self.conf.conf(feats)
         elif self.kind == "fixed":
-            l_, a = len(draft), self.conf.conf(feats)
+            l_ = len(draft)
         else:
-            l_, a = schedule(self.conf.conf(feats), self.cost, ctx)
-        self._feats, self._a = feats[:l_], a
+            l_ = schedule(conf, self.cost, ctx)[0]
+        a, run = [], 1.0
+        for c in conf:
+            run *= c
+            a.append(run)
+        self._pending.append((len(self.drafter.tokens), draft, feats, a))
         return draft[:l_]
 
     def observe(self, draft: list[int], emitted: list[int]):
@@ -216,11 +228,26 @@ class SpecPolicy:
         self.stats["drafted_verified"] += len(draft)
         self.stats["accepted"] += n_acc
         if draft:
-            self.conf.update(self._feats, len(draft), n_acc)
-            for j in range(len(draft)):
-                self.calib.append((self._a[j], 1.0 if j < n_acc else 0.0))
             self.drafter.update_stats(len(draft), n_acc)
         self.drafter.extend(emitted)
+        self._resolve()
+
+    def _resolve(self):
+        toks, keep = self.drafter.tokens, []
+        L = len(toks)
+        for p0, d, f, a in self._pending:
+            avail = min(L - p0, len(d))
+            n = 0
+            while n < avail and d[n] == toks[p0 + n]:
+                n += 1
+            mismatch = n < avail
+            if not mismatch and avail < len(d):
+                keep.append((p0, d, f, a))  # not all of its positions emitted yet
+                continue
+            evaluated = n + 1 if mismatch else n
+            self.conf.update(f, evaluated, n)
+            self.calib.extend((a[j], 1.0 if j < n else 0.0) for j in range(evaluated))
+        self._pending = keep
 
     def ece(self, bins: int = 10) -> float:
         if not self.calib:

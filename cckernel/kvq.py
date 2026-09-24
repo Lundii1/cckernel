@@ -32,6 +32,8 @@ from .hadamard import fwht, random_signs
 BF16, FP8, FP4 = 0, 1, 2
 KV_FORMATS = {"bf16": (BF16, BF16), "fp8": (FP8, FP8), "k8v4": (FP8, FP4), "fp4": (FP4, FP4)}
 KV_SEED = 0x4B56  # Hadamard sign seed of the KV rotation (stored in the manifest runtime block)
+DEFAULT_KV = "auto"  # default KV format written into new manifests (see docs/MATH.md sec. 9 for the measurements)
+AUTO_ORDER = ("bf16", "fp8", "k8v4", "fp4")  # most to least accurate (measured, docs/MATH.md sec. 9)
 GROUP = 16
 E4M3_MAX_CODE = 0x7E  # 448; 0x7F is NaN in e4m3fn
 E2M1_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
@@ -45,6 +47,22 @@ def bytes_per_value(f: int) -> float:
 def kv_bytes_per_token(fmt: str, n_layers: int, hkv: int, d: int) -> int:
     kf, vf = KV_FORMATS[fmt]
     return int(n_layers * hkv * d * (bytes_per_value(kf) + bytes_per_value(vf)))
+
+
+def auto_format(max_len: int, n_layers: int, hkv: int, d: int, weight_bytes: float,
+                free_bytes: float | None = None, traffic_frac: float = 0.125) -> str:
+    """Pick the most accurate KV format that pays off for this context length.
+
+    Quantizing the KV cache costs accuracy (measured: KL +1.1e-3 for fp8, +5e-3 for fp4 over bf16) and
+    only buys speed once KV reads are a noticeable part of a decode step, whose traffic is dominated by
+    the weights. So: the first format of AUTO_ORDER whose full cache (max_len tokens) is at most
+    ``traffic_frac`` of the weight bytes and fits in ``free_bytes`` (when known); fp4 otherwise.
+    For the q8 9B model (8.06 GB of weights): bf16 up to ~31K tokens, fp8 to ~61K, k8v4 to ~79K, fp4 beyond."""
+    for fmt in AUTO_ORDER:
+        kv = max_len * kv_bytes_per_token(fmt, n_layers, hkv, d)
+        if kv <= traffic_frac * weight_bytes and (free_bytes is None or kv <= free_bytes):
+            return fmt
+    return AUTO_ORDER[-1]
 
 
 # ------------------------------------------------------------------------------------------ rotation

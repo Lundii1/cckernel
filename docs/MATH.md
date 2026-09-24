@@ -218,6 +218,23 @@ With 16-channel groups plus the MSE search, plain fp4 already handles synthetic 
 
 **Prefill.** It quantizes into the cache first, then attends over the dequantized cache. Prefill, decode and verify therefore read identical values, and speculative verification stays exact (`test_fp4_speculative_verify_equals_greedy`).
 
+**Measured on the real model** (`tools/eval_quality.py`, 8,704 positions against the fp32 reference, [`eval_kv.json`](eval_kv.json)).
+
+KL on stable positions:
+
+| KV cache | KL | Increase over bf16 KV |
+|---|---|---|
+| bf16 | 1.6e-3 | — |
+| fp8 | 2.7e-3 | +1.1e-3 |
+| k8v4 | 4.3e-3 | +2.7e-3 |
+| fp4 | 6.8e-3 | +5.2e-3 |
+| fp4 without rotation | 7.1e-3 | +5.5e-3 |
+
+- **Perplexity** is within ±0.1 % throughout, and top-1 agreement falls from 98.3 % to 96.7 %.
+- **Rotation:** it helps a little.
+- **Range:** with rotation, no written value exceeds 30, far inside E4M3's 448.
+- **Why the default is automatic:** post-training FP4 is not free, and KV reads are a small part of a decode step at short context. So `kvq.auto_format` keeps bf16 while the full cache would be at most 1/8 of the weight bytes, then steps down fp8 → k8v4 → fp4. For the 9B model the switch points are about 31K, 61K and 79K tokens.
+
 **What is deliberately not quantized.** The 24 GDN states (48 MiB fp32) are the analogue of the paper's local SWA state, which it keeps at higher precision because it is "sensitive to quantization". They are read and written every token and are small next to the weights, so they stay fp32.
 
 ## 10. Confidence-scheduled verification (DSpark)
@@ -240,6 +257,11 @@ The scheduler picks ℓ* = argmax (1 + Σ_{j≤ℓ} a_j) / T(1+ℓ, ctx).
 - It uses Beta-smoothed counts in a back-off hierarchy of buckets: (regime, match order, agreeing earlier occurrences, position) → … → position → global.
 - Counts are censored after the first rejection.
 - Empirical frequencies are calibrated by construction; the ECE is reported per run.
+
+**Hindsight learning.** The counts are updated from *every* proposed draft, not only the verified part. Once its positions have been emitted, draft token j counts as accepted iff it and all earlier draft tokens match the emitted tokens.
+- Under greedy decoding this is exactly the verification outcome.
+- Under sampling it has the same probability p(d).
+- It fixes a lock-in failure seen on the real model: after a run of misses, a scheduler that learns only from verified tokens stops verifying, and then never observes anything again.
 
 **Exactness.** DSpark must stop admission early because its draft tokens are sampled, so a later confidence depends on an earlier sample. An n-gram draft and the confidence state are deterministic functions of the history. Any length rule computed from them before verification therefore leaves the output distribution unchanged, so the global argmax is allowed. `test_scheduled_sampling_is_exact` checks this: TV distance to the exact sequence distribution under temperature 1.
 

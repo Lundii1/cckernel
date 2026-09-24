@@ -81,6 +81,14 @@ def test_rotated_fp4_error_is_structure_independent():
         assert 0.006 < rel(kvq.rotate(x, s)) < 0.0085
 
 
+def test_auto_format_thresholds():
+    w = 8.06e9  # q8 9B weights
+    f = lambda n, free=None: kvq.auto_format(n, 8, 4, 256, w, free)  # noqa: E731
+    assert f(4096) == "bf16" and f(30000) == "bf16"
+    assert f(50000) == "fp8" and f(75000) == "k8v4" and f(262144) == "fp4"
+    assert f(20000, free=0.35e9) == "fp8"  # bf16 (655 MB) would not fit in the remaining memory
+
+
 # ------------------------------------------------------------------------------------------ engine
 CFG = TextConfig.tiny(hidden_size=256, intermediate_size=512, vocab_size=600, num_attention_heads=4,
                       num_key_value_heads=1, head_dim=256, linear_num_key_heads=2, linear_num_value_heads=4,

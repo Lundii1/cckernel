@@ -107,8 +107,9 @@ def main():
     ap.add_argument("--spec", action="store_true", help="n-gram speculative decoding")
     ap.add_argument("--spec-policy", choices=["sched", "ewma", "fixed"], default="sched",
                     help="verification length: confidence-scheduled (default), EWMA heuristic, or always max")
-    ap.add_argument("--kv", choices=["bf16", "fp8", "k8v4", "fp4"], default=None,
-                    help="KV cache format (default: the manifest's runtime.kv_cache)")
+    ap.add_argument("--kv", choices=["auto", "bf16", "fp8", "k8v4", "fp4"], default=None,
+                    help="KV cache format (default: the manifest's runtime.kv_cache; auto = bf16 for short contexts, "
+                         "fp8/k8v4/fp4 as --max-len grows)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--prefix-cache", default=None, help="directory of persistent prompt/output snapshots")
     ap.add_argument("--no-graphs", action="store_true")

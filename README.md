@@ -1,6 +1,11 @@
 # cckernel
 
-These are CUDA kernels and a lean runtime for **[XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B)**, which is Qwen3.5-9B with hybrid Gated DeltaNet and gated attention layers. They target an **RTX 4060 Ti 16 GB** (Ada, sm_89). The model is quantized so that it fits in 16 GB with minimal quality loss. Every kernel is derived from a paper; see [`docs/MATH.md`](docs/MATH.md).
+CUDA kernels and a lean runtime for **[XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B)**. The model is Qwen3.5-9B with hybrid Gated DeltaNet and gated attention layers.
+
+- **Hardware:** an **RTX 4060 Ti 16 GB** (Ada, sm_89).
+- **Quantization:** the model is quantized to fit in 16 GB with minimal quality loss.
+- **Papers:** every kernel is derived from a paper; see [`docs/MATH.md`](docs/MATH.md).
+- **DeepSeek-V4.1-Flash:** the parts of arXiv 2609.19969 that work without retraining are integrated, and their accuracy and speed are measured (see [below](#deepseek-v41-flash-integration-arxiv-260919969)).
 
 ## What's inside
 
@@ -11,12 +16,16 @@ These are CUDA kernels and a lean runtime for **[XiaomiMiMo/MiMo-V2.6-Distill-Qw
 | Per-matrix bit allocation under a VRAM budget | `alloc.py`, `tools/calibrate_alpha.py` | Linearity theorem plus an exact knapsack (HIGGS) |
 | Dequant-fused GEMV with a fused RMSNorm / gated-norm prologue and residual / SwiGLU epilogue | `csrc/qgemv.cu` | Streaming loads, magic-number dequant (Marlin 2408.11743) |
 | Gated DeltaNet decode, reading and writing S once per token | `csrc/gdn.cu` | One-pass delta rule, column-split state (Gated DeltaNet 2412.06464) |
-| Deferred GDN commit for speculative rollback, no state snapshots | `csrc/gdn.cu` | TreeWY 2608.20961 / ReplaySSM |
-| GQA split-KV decode attention with in-kernel combine and σ-gate | `csrc/attn.cu` | Flash-decoding, gated attention 2505.06708 |
-| Tensor-core skinny GEMM (2..8 tokens) for verification | `csrc/skinny.cu` | Flat GEMM (FlashDecoding++ 2311.01282) |
+| Deferred GDN commit for speculative rollback, with no state snapshots | `csrc/gdn.cu` | TreeWY 2608.20961 / ReplaySSM |
+| GQA split-KV decode attention with in-kernel dequant, combine and σ-gate | `csrc/attn.cu` | Flash-decoding, gated attention 2505.06708 |
+| **FP4 / FP8 / K8V4 KV cache** with an MSE scale search and an optional per-head Hadamard rotation | `cckernel/kvq.py`, `csrc/attn.cu` | **DeepSeek-V4.1-Flash 2609.19969 §2.4.4** (FP4 = E2M1 + E4M3 per 16 channels) |
+| **Confidence-scheduled speculative verification** | `cckernel/spec.py` | **DSpark 2607.05147**, used by DeepSeek-V4.1-Flash |
+| **Persistent prefix cache** (KV prefix + recurrent-state snapshots) | `cckernel/prefix_cache.py` | **DeepSeek-V4.1-Flash §3.2.1** |
+| Tensor-core skinny GEMM (2–8 tokens) for verification | `csrc/skinny.cu` | Flat GEMM (FlashDecoding++ 2311.01282) |
 | Chunked WY/UT prefill | `cckernel/torch_ops.py` | DeltaNet chunkwise algorithm (2406.06484) |
 | N-gram speculative decoding with exact acceptance | `cckernel/spec.py` | Speculative sampling with a point-mass draft |
 | CUDA-graph decode engine, layer-major prefill | `cckernel/engine.py` | |
+| **CPU backend** that runs the 9B model (int8 GEMV, AMX prefill) | `cckernel/cpu.py` | Used for every measurement in this README |
 
 ## Quick start (Linux or Windows, RTX 40xx)
 
@@ -25,18 +34,24 @@ pip install torch safetensors transformers    # a CUDA toolkit matching your tor
 pip install -e .                              # builds cckernel._C for sm_89
 
 # 1. quantize once: INT8 "quality" recipe with a built-in accuracy report (KL / top-1 / perplexity vs bf16).
-#    Streams tensors straight from the Hub with HTTP range requests, so the 18.8 GB shards are never stored;
-#    peak RAM is a few GB. Use --model DIR instead of --hf-repo for a local copy, --device cuda to speed it up.
+#    Streams tensors straight from the Hub with HTTP range requests, so the 18.8 GB shards are never stored.
 python tools/quantize_stream.py --hf-repo XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B --out /models/mimo-cck-q8
 
-# 2. chat / generate (add --spec for n-gram speculative decoding)
-python -m cckernel.generate --model /models/mimo-cck-q8 --chat --spec --prompt "Write a C function that reverses a linked list."
+# 2. chat / generate
+#    --spec            n-gram speculative decoding with confidence-scheduled verification
+#    --kv auto         KV cache format: bf16 for short contexts, fp8 / k8v4 / fp4 as --max-len grows
+#    --prefix-cache    reuse snapshots of earlier prompts / answers instead of prefilling them again
+python -m cckernel.generate --model /models/mimo-cck-q8 --chat --spec --kv auto --max-len 131072 \
+    --prefix-cache /tmp/cck_prefix --prompt "Write a C function that reverses a linked list."
 
 # 3. check and measure on your GPU
 pytest tests                                  # CPU math + emulated engine; tests/gpu run the real kernels
 python bench/kernels.py                       # per-kernel GB/s vs 288 GB/s
-python bench/decode.py --model /models/mimo-cck-q8 --ctx 512 8192 32768
+python bench/decode.py --model /models/mimo-cck-q8 --ctx 512 8192 32768 --kv bf16 fp4 --profile
+python tools/eval_generate.py --model /models/mimo-cck-q8 --device cuda --out eval_gpu.json   # coherence + speed
 ```
+
+With no GPU, add `--device cpu` to `generate` or the tools. This uses the CPU backend, which needs about 11 GB of RAM and a CPU with AVX-512 / AMX. On the 4-core Xeon used here it decodes at about 1.5 tok/s.
 
 ## Fitting 16 GB with minimal quality loss
 
@@ -46,54 +61,153 @@ python bench/decode.py --model /models/mimo-cck-q8 --ctx 512 8192 32768
 | `balanced` | knapsack at 6.5 bpw, lm_head ≥ 8 | ≈6.2 GiB | ≈8.1 GiB | ≈43 tok/s |
 | `fast` | knapsack at 5.25 bpw, lm_head ≥ 6 | ≈5.0 GiB | ≈6.9 GiB | ≈54 tok/s |
 
-On top of the weights come the KV cache (1 GiB per 32K tokens, since only 8 layers carry one), the GDN state (48 MiB) and about 0.8 GiB of scratch and CUDA context. `quality` therefore runs a 128K context inside 16 GB.
+On top of the weights come:
+- the KV cache, which depends on the format (below);
+- the GDN state, 48 MiB;
+- about 0.8 GiB of scratch space and CUDA context.
 
-`quality_report.json`, written next to the checkpoint, records the measured loss. Both sides of the comparison are fp32, so it isolates the weight-quantization error. It contains:
-- per-matrix t²;
-- the relative residual-stream error after every layer;
-- mean and max KL(p_bf16 ‖ p_quant);
-- top-1 agreement;
-- reference vs quantized perplexity on WikiText-2 and code.
+`quality_report.json`, written next to the checkpoint, records the measured weight-quantization loss.
 
-The `balanced` and `fast` presets use `tools/quantize.py`. For a measured, rather than prior-based, allocation, calibrate α on the INT8 model first:
+## DeepSeek-V4.1-Flash integration (arXiv 2609.19969)
 
-```bash
-python tools/calibrate_alpha.py --model /models/mimo-cck-q8 --text some_corpus.txt --out alphas.json
-python tools/quantize.py --model /models/MiMo-V2.6-Distill-Qwen-9B --out /models/mimo-cck-b --preset balanced --alphas alphas.json
-```
+**What transfers.** Most of the paper needs pre-training or QAT: the causal encoder-decoder, CSA2 cross-layer KV reuse, Engram, the trained DSpark drafter and QAT itself. Three ideas apply to an already-trained model:
+
+1. **Quantized KV cache (§2.4.4).**
+   - The paper's FP4 format is E2M1 values with one E4M3 scale per 16 channels, quantized after RoPE.
+   - FP8 (E4M3) and K8V4 (K fp8, V fp4) are provided as well.
+   - Two changes replace the missing QAT: an MSE search over the E4M3 scale codes, and an optional per-head Hadamard rotation. The rotation is exact for qᵀk; the output is un-rotated before the gate.
+   - The CUDA kernels encode and decode bit-identically to `cckernel/kvq.py`.
+   - The GDN recurrent state stays fp32. It plays the role of the paper's sensitive local state, which the paper keeps at higher precision.
+2. **DSpark confidence-scheduled verification (§2.4.3).** For each step, the verification length ℓ maximises (1 + Σ a_j) / T(1+ℓ, ctx), where:
+   - a_j are prefix-survival probabilities;
+   - T is the step time, profiled per machine or taken from the 4060 Ti bandwidth model.
+
+   DSpark's trained confidence head is replaced by online counts for our n-gram drafts. They learn in hindsight from every draft, and they stay exact because they only read the past.
+3. **Persistent prefix cache (§3.2.1).** Snapshots are taken at the end of the prompt and the end of the answer. A later request restores the longest cached prefix and prefills only the rest.
+
+All numbers below were measured in this repository's container on CPU with the real engine: 4-core Xeon with AMX, **no GPU**. GPU speed is **modeled** (bandwidth roofline) wherever it says so. [`docs/eval_kv.json`](docs/eval_kv.json), [`docs/eval_generate.json`](docs/eval_generate.json) and [`docs/samples/`](docs/samples) hold the raw data.
+
+### Accuracy vs the original bf16 model
+
+The reference is fp32 with HF semantics, run on the original bf16 weights streamed from the Hub. The eval set is 8,704 positions: 2 × 256 tokens plus 2 × 4096 tokens of WikiText-2 and code.
+
+**11 positions are left out of the stable columns.** They sit in a repetitive list in the long prose sequence, where copy heads are on a knife-edge. There, the reference *and* every quantized variant each predict confidently wrong tokens (e.g. " members" after "bass ("), at different positions. Those positions dominate the plain mean KL.
+
+| KV cache | Bytes/token | KL vs original (stable positions) | KL vs bf16-KV engine | Top-1 agreement | Perplexity (original 5.226) |
+|---|---|---|---|---|---|
+| bf16 (before) | 32,768 | 1.6e-3 | 0 | 98.3 % | 5.216 |
+| fp8 | 16,384 | 2.7e-3 | 1.3e-3 | 97.9 % | 5.211 |
+| k8v4 | 12,800 | 4.3e-3 | 3.7e-3 | 97.4 % | 5.219 |
+| **fp4 (paper format)** | **9,216** | 6.8e-3 | 1.0e-2 | 96.7 % | 5.232 |
+| fp4, no rotation | 9,216 | 7.1e-3 | 1.1e-2 | 96.6 % | 5.233 |
+
+**Findings:**
+- **Perplexity does not change measurably**, at most +0.1 %.
+- **The token-level distribution does change.** Without the paper's QAT, FP4 moves about 1.6 % of top-1 predictions.
+- **The rotation helps a little.**
+- **Rule fixed before measuring:** KL at most +5e-4 and top-1 at most −0.5 points over bf16 KV. No quantized format passes it (fp8: +1.1e-3 KL, −0.4 points top-1).
+
+That, together with the speed table, is why the default is **`--kv auto`**:
+- bf16 up to about 31K tokens, where KV reads are under 12.5 % of a step's traffic, so compressing them would buy about 1–9 % speed at an accuracy cost;
+- fp8 to about 61K tokens, k8v4 to about 79K, and fp4 beyond, where it pays off.
+
+### Speed and memory
+
+**Modeled RTX 4060 Ti decode ceiling** (288 GB/s at 80 % efficiency, `tools/kv_roofline.py`):
+
+| KV cache | Longest context that fits in 15.5 GiB | 4K ctx | 32K ctx | 128K ctx | 256K ctx |
+|---|---|---|---|---|---|
+| bf16 | 172K | 27.8 tok/s | 25.0 | 18.5 | out of memory |
+| fp8 | 262K (full) | 28.0 | 26.5 | 22.4 | 18.5 |
+| fp4 | 262K (full) | 28.1 | 27.2 (+9 %) | 24.6 (+33 %) | 21.8 |
+
+**Speculative decoding** is measured as the exact replay of each policy on the recorded greedy outputs of the 15-prompt suite. Greedy output does not depend on the policy; on this backend a verified token's logits match plain decoding bit for bit.
+
+| Step-cost model | Old EWMA drafter | Always verify all | **Confidence-scheduled** |
+|---|---|---|---|
+| This CPU (measured T(M), verifying 8 tokens = 2.9 × one step) | 1.08× | 0.77× | **1.14×** |
+| 4060 Ti model, short context | 1.50× | 1.51× | **1.53×** |
+| 4060 Ti model, +32K context, bf16 KV | 1.27× | 1.04× | **1.28×** |
+| 4060 Ti model, +32K context, fp4 KV | 1.42× | 1.33× | **1.43×** |
+
+(Speedup over no speculation, bf16-KV outputs. On the fp4-KV outputs, the scheduler is at 1.19×, 1.61×, 1.32× and 1.48×.)
+
+**What this shows:**
+- The scheduler matches the old heuristic where verification is almost free, and avoids its losses where verification is expensive (this CPU; long contexts).
+- FP4 KV makes verification cheaper at long context. Each verified token reads the KV cache, so FP4 lifts speculation from 1.28× to 1.43×.
+
+**Measured on this CPU with the real engine** (hindsight-learning scheduler, [`docs/eval_validate.json`](docs/eval_validate.json)):
+- Speculative output was token-for-token identical to the no-speculation run on every prompt.
+- The replayed step count matched the real run exactly (8/8).
+
+| Prompt | Tokens / step | Decode speed | vs no speculation |
+|---|---|---|---|
+| Code edit (add type hints: copies the input) | 2.75 (fp4) / 2.42 (bf16) | 2.78 / 2.62 tok/s | **1.84× / 1.73×** |
+| Arithmetic word problem | 1.49 / 1.53 | 1.76 / 1.95 tok/s | 1.15× / 1.27× |
+| One-sentence summary | 1.52 / 1.50 | 1.68 / 1.75 tok/s | 1.12× / 1.16× |
+| FizzBuzz (little to copy) | 1.16 / 1.18 | 1.54 / 1.58 tok/s | 1.02× / 1.05× |
+
+
+**Prefix cache.** In the two-turn chat test, turn 2 restored 46 of its 70 prompt tokens from the snapshot and prefilled only the remaining 24. A cached 6K-token document would save about 100 s of CPU prefill per request here, or about 1–2 s on a 4060 Ti.
+
+### Coherence and output quality
+
+This is the 15-prompt suite in `tools/eval_generate.py`: chat template, greedy decoding, thinking off except for 2 prompts. Every check is automatic:
+- math answers;
+- generated Python run against unit tests;
+- JSON validity;
+- facts;
+- a two-turn memory question through the prefix cache;
+- reasoning prompts;
+- degeneration metrics.
+
+| Configuration | Passed | Repeated 4-grams | Distinct-2 |
+|---|---|---|---|
+| bf16 KV, no speculation (before) | 14 / 15 | 0.186 | 0.831 |
+| fp4 KV + scheduled speculation (new) | 14 / 15 | 0.188 | 0.832 |
+
+**How the two runs compare:**
+- 12 of the 15 outputs are word-for-word identical between the two configurations. The other 3 differ in wording and still pass. For example, the code edit uses built-in generics instead of `typing`.
+- **The one failure is the same in both:**
+  - The JSON prompt returned `{"name": "Ada Lovelace", "age": 34, "languages": ["Python", "C++", "Go"]` without the closing brace.
+  - At the last list item, the next-token probabilities were a three-way tie: `"]` 0.36, `",` 0.32 and `"]}` 0.30. Greedy decoding took `"]`.
+  - After that, the closing brace was spread over `}</`, `` }` ``, `}"` and `}` (about 0.40 together), so end-of-message won at 0.41.
+  - This is a greedy-decoding quirk that INT8 noise can tip either way, not a KV-cache effect.
+
+**Needle in a haystack.** A passphrase was inserted at 10 %, 50 % and 90 % depth of a 6,043-token WikiText-2 document. It was retrieved 3/3 with bf16 KV and 3/3 with fp4 KV.
+
+Full transcripts: [`docs/samples/`](docs/samples).
 
 ## Validation status
 
-- **In the development container (no GPU): 37 CPU tests pass.**
-  - They cover the three gated-delta-rule algorithms and the deferred commit, to 1e-9.
-  - Folding the norms and the Hadamard rotation leaves the model's function unchanged, to 1e-6.
-  - The packing layout and the emulated GEMV and mma-fragment decode are exact.
-  - The quantizer error follows theory, and the knapsack matches brute force.
-  - N-gram acceptance is exact.
-  - The **full engine** runs through a torch emulation of every CUDA op. That covers prefill, decode, speculative verify/rollback (identical to greedy) and multi-turn prefill after decode.
-- **The CUDA sources compile for sm_89** with nvcc 13.0, with no register spills, and the extension links against torch.
-- **Not yet run on a GPU.** `tests/gpu` checks every kernel against its emulation, plus the GPU engine against the CPU engine and optional HF parity (`CCK_HF_MODEL=... CCK_MODEL=... pytest tests/gpu/test_hf_parity.py -s`). The benchmarks also still need a GPU run.
-- **The real model has been quantized** with `quality` (INT8, rotated, MSE clip), streamed from the Hub. The run took 27.5 min on 4 CPU cores and fetched 16.7 GiB. The full report is [`docs/quality_report_q8.json`](docs/quality_report_q8.json). On 512 eval tokens (256 WikiText-2 + 256 code), measured against the fp32 reference of the original bf16 weights:
+- **70 CPU tests pass.** New since the DeepSeek integration:
+  - KV formats against brute force;
+  - scale search and rotation;
+  - the engine with a quantized cache against the oracle;
+  - exact speculative verification with the fp4 cache;
+  - CPU backend parity and M-invariance;
+  - scheduler argmax, censoring and sampling exactness;
+  - replay against live runs;
+  - session and prefix-cache round trips.
 
-  | Metric | Value |
-  |---|---|
-  | Weights / embedding | 7.51 GiB INT8 / 1.89 GiB bf16 |
-  | Per-matrix t² (mean / max) | 4.3e-5 / 5.7e-5 |
-  | KL(p_bf16 ‖ p_int8), mean / max | 8.4e-4 / 4.6e-2 nats |
-  | Top-1 next-token agreement | 98.05 % (10 / 512 tokens differ) |
-  | Perplexity, WikiText-2 | 16.14 → 16.11 |
-  | Perplexity, code | 4.80 → 4.82 |
-  | Perplexity, combined | 8.803 → 8.811 (+0.09 %) |
-  | Residual-stream error after the last layer | 2.2 % (prose), 3.6 % (code) |
+  Earlier suites: the gated-delta-rule algorithms, folding, packing, quantizer and knapsack, and the emulated end-to-end engine.
+- **The CUDA sources compile for sm_89** with nvcc 13.0 and no register spills. All 8 attention kernel variants and the extension link.
+- **The real 9B model runs end to end on the CPU backend.** That covers every accuracy, coherence, retrieval and speed number above.
+- **Not yet run on a GPU.** `tests/gpu` checks every kernel, including each KV format byte for byte, against its emulation. The benchmarks and `tools/eval_generate.py --device cuda` produce the real GPU numbers.
+- **Weight quantization** (`quality`, INT8, rotated, MSE clip): [`docs/quality_report_q8.json`](docs/quality_report_q8.json), measured on 512 tokens against the fp32 reference:
+  - top-1 agreement 98.05 %;
+  - KL 8.4e-4;
+  - perplexity 8.803 → 8.811.
 
 ## Layout
 
 ```
 cckernel/    config, loader, reference (fp32 oracle), quant + packing, alloc, folded model,
-             torch_ops (prefill), emu (CUDA-op emulation), engine, spec, generate
+             torch_ops (prefill), kvq (KV formats), emu (CUDA-op emulation), cpu (CPU backend),
+             engine, spec (drafter + scheduler + replay), prefix_cache, generate
 csrc/        common.cuh, qgemv.cu, gdn.cu, attn.cu, skinny.cu, bindings.cpp
-tools/       quantize.py, calibrate_alpha.py
+tools/       quantize.py, quantize_stream.py, calibrate_alpha.py, eval_quality.py, eval_generate.py, kv_roofline.py
 tests/cpu    math + emulated end-to-end tests      tests/gpu   kernel/engine/HF parity
 bench/       kernels.py, decode.py
-docs/        MATH.md
+docs/        MATH.md, eval_kv.json, eval_generate.json, kv_roofline.json, samples/
 ```
