@@ -69,5 +69,23 @@ class Checkpoint:
         t = h.get_tensor(full)
         return t if dtype is None else t.to(dtype)
 
+    def get_rows(self, name: str, r0: int, r1: int, dtype: torch.dtype | None = torch.float32) -> torch.Tensor:
+        """Rows [r0, r1) of a 2-D tensor without materialising the whole tensor."""
+        full, fname = self._map[name]
+        h = self._handles.get(fname)
+        if h is None:
+            h = self._safe_open(str(self.path / fname), framework="pt")
+            self._handles[fname] = h
+        t = h.get_slice(full)[r0:r1]
+        return t if dtype is None else t.to(dtype)
+
+    def shape(self, name: str) -> list[int]:
+        full, fname = self._map[name]
+        h = self._handles.get(fname)
+        if h is None:
+            h = self._safe_open(str(self.path / fname), framework="pt")
+            self._handles[fname] = h
+        return list(h.get_slice(full).get_shape())
+
     def layer(self, i: int, sub: str, dtype: torch.dtype | None = torch.float32) -> torch.Tensor:
         return self.get(f"layers.{i}.{sub}", dtype)

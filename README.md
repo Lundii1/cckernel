@@ -24,8 +24,10 @@ These are CUDA kernels and a lean runtime for **[XiaomiMiMo/MiMo-V2.6-Distill-Qw
 pip install torch safetensors transformers    # a CUDA toolkit matching your torch build is required to compile
 pip install -e .                              # builds cckernel._C for sm_89
 
-# 1. quantize once (streams the HF checkpoint; about 10-20 min on the GPU)
-python tools/quantize.py --model /models/MiMo-V2.6-Distill-Qwen-9B --out /models/mimo-cck-q8 --preset quality
+# 1. quantize once: INT8 "quality" recipe with a built-in accuracy report (KL / top-1 / perplexity vs bf16).
+#    Streams tensors straight from the Hub with HTTP range requests, so the 18.8 GB shards are never stored;
+#    peak RAM is a few GB. Use --model DIR instead of --hf-repo for a local copy, --device cuda to speed it up.
+python tools/quantize_stream.py --hf-repo XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B --out /models/mimo-cck-q8
 
 # 2. chat / generate (add --spec for n-gram speculative decoding)
 python -m cckernel.generate --model /models/mimo-cck-q8 --chat --spec --prompt "Write a C function that reverses a linked list."
@@ -46,7 +48,14 @@ python bench/decode.py --model /models/mimo-cck-q8 --ctx 512 8192 32768
 
 On top of the weights come the KV cache (1 GiB per 32K tokens, since only 8 layers carry one), the GDN state (48 MiB) and about 0.8 GiB of scratch and CUDA context. `quality` therefore runs a 128K context inside 16 GB.
 
-For a measured, rather than prior-based, allocation, calibrate α on the INT8 model first:
+`quality_report.json`, written next to the checkpoint, records the measured loss. Both sides of the comparison are fp32, so it isolates the weight-quantization error. It contains:
+- per-matrix t²;
+- the relative residual-stream error after every layer;
+- mean and max KL(p_bf16 ‖ p_quant);
+- top-1 agreement;
+- reference vs quantized perplexity on WikiText-2 and code.
+
+The `balanced` and `fast` presets use `tools/quantize.py`. For a measured, rather than prior-based, allocation, calibrate α on the INT8 model first:
 
 ```bash
 python tools/calibrate_alpha.py --model /models/mimo-cck-q8 --text some_corpus.txt --out alphas.json

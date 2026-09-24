@@ -12,7 +12,10 @@ Presets (weights only; embedding kept in bf16 = 2.0 GB, KV cache/state come on t
   fast      knapsack, avg ~5.25 bit, lm_head >= 6    ~5.4 GB + 2.0 GB
 
 Example:
-  python tools/quantize.py --model /models/MiMo-V2.6-Distill-Qwen-9B --out /models/mimo-cck-q8 --device cuda
+  python tools/quantize.py --model /models/MiMo-V2.6-Distill-Qwen-9B --out /models/mimo-cck-b --preset balanced
+
+For the INT8 'quality' recipe with a built-in accuracy report (and optional streaming straight from the
+Hub without downloading the shards) use tools/quantize_stream.py.
 """
 
 from __future__ import annotations
@@ -55,14 +58,22 @@ def measure_t2(cfg, ckpt, signs, device, clip_grid) -> dict[str, dict[int, float
             if k not in quant.LINEAR_NAMES:
                 continue
             name = f"layers.{i}.{k}"
-            t2[name] = {b: quant.rel_mse(w, quant.dequant_rtn(*quant.quantize_rtn(w, b, clip_grid=clip_grid), b))
-                        for b in CHOICES}
+            t2[name] = {b: quant.QLinear.from_weight(w, b, clip_grid=clip_grid).t2 for b in CHOICES}
         print(f"  t2 layer {i:2d}: " + ", ".join(f"{k}={t2[f'layers.{i}.{k}'][8]:.2e}@8b" for k in mats
                                                   if k in quant.LINEAR_NAMES), flush=True)
-    g = quant.fold_globals(cfg, lambda n: ckpt.get(n).to(device), signs.to(device) if signs is not None else None)
-    lm = g["lm_head"]
-    t2["lm_head"] = {b: quant.rel_mse(lm, quant.dequant_rtn(*quant.quantize_rtn(lm, b, clip_grid=clip_grid), b))
-                     for b in CHOICES}
+    # lm_head in row chunks (the 248320 x 4096 matrix does not fit comfortably in fp32 at once)
+    err = {b: 0.0 for b in CHOICES}
+    ref = 0.0
+    nw = ckpt.get("norm.weight").to(device)
+    sd = signs.to(device) if signs is not None else None
+    for r0 in range(0, cfg.vocab_size, 16384):
+        rows = quant.fold_lm_head_rows(ckpt.get_rows("lm_head.weight", r0, min(cfg.vocab_size, r0 + 16384)).to(device),
+                                       nw, sd)
+        n2 = float((rows ** 2).sum())
+        ref += n2
+        for b in CHOICES:
+            err[b] += quant.QLinear.from_weight(rows, b, clip_grid=clip_grid).t2 * n2
+    t2["lm_head"] = {b: err[b] / ref for b in CHOICES}
     return t2
 
 
@@ -113,7 +124,8 @@ def main():
     if t2 is not None:
         extra["t2_table"] = t2
     manifest = write_cck(cfg, ckpt.get, out, bits, seed=None if args.no_rotate else args.seed, device=args.device,
-                         clip_grid=args.clip_grid, extra=extra, log=lambda m: print(m, flush=True))
+                         clip_grid=args.clip_grid, extra=extra, log=lambda m: print(m, flush=True),
+                         get_rows=lambda n, a, b: ckpt.get_rows(n, a, b))
     total_bytes, stats = manifest["quantized_weight_bytes"], manifest["stats"]
     for f in src.iterdir():  # tokenizer / chat template / generation config
         if f.suffix in (".json", ".jinja", ".txt", ".model") and "safetensors" not in f.name:

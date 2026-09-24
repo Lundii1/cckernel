@@ -89,3 +89,63 @@ def test_calibrate_alpha_cli(tmp_path):
     assert r.returncode == 0, r.stderr
     alphas = json.loads((tmp_path / "a.json").read_text())
     assert len(alphas) == 4 * 4 + 1 and all(v > 0 for v in alphas.values())
+
+
+def _stream_cfg():
+    return TextConfig.tiny(hidden_size=256, intermediate_size=512, vocab_size=600, num_attention_heads=4,
+                           num_key_value_heads=1, head_dim=256, linear_num_key_heads=2, linear_num_value_heads=4,
+                           linear_key_head_dim=128, linear_value_head_dim=128, rope_theta=1e7)
+
+
+def _check_stream_out(out: Path):
+    rep = json.loads((out / "quality_report.json").read_text())["summary"]
+    assert rep["kl_mean"] < 1e-3 and rep["t2_max"] < 2e-4, rep
+    assert rep["top1_agreement"] > 0.9, rep
+    assert abs(rep["ppl_quant"] / rep["ppl_ref"] - 1) < 5e-3, rep
+    man = json.loads((out / "cck_manifest.json").read_text())
+    assert set(man["bits"].values()) == {8} and "quality" in man
+    eng = Engine(out, device="cpu", max_len=64, attn_splits=4)
+    assert torch.isfinite(eng.prefill(list(range(12)))).all()
+
+
+def test_quantize_stream_local(tmp_path):
+    src, out = tmp_path / "hf", tmp_path / "cck"
+    src.mkdir()
+    _fake_hf(src, _stream_cfg())
+    r = subprocess.run([sys.executable, str(ROOT / "tools/quantize_stream.py"), "--model", str(src), "--out", str(out),
+                        "--device", "cpu", "--clip-grid", "4", "--eval-tokens", "24"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr + r.stdout
+    _check_stream_out(out)
+
+
+def test_quantize_stream_remote_equals_local(tmp_path):
+    """--hf-repo through a local range server produces byte-identical files to --model."""
+    import threading
+    from functools import partial
+    from http.server import ThreadingHTTPServer
+
+    from tests.cpu.test_remote import RangeHandler
+
+    src = tmp_path / "hf"
+    src.mkdir()
+    _fake_hf(src, _stream_cfg())
+    (src / "model.safetensors.index.json").write_text(json.dumps(
+        {"weight_map": {k: "model.safetensors" for k in __import__("safetensors").safe_open(
+            str(src / "model.safetensors"), "pt").keys()}}))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), partial(RangeHandler, directory=str(src)))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        outs = []
+        for mode in ("local", "remote"):
+            out = tmp_path / mode
+            srcargs = ["--model", str(src)] if mode == "local" else [
+                "--hf-repo", "org/fake", "--endpoint", f"http://127.0.0.1:{httpd.server_address[1]}"]
+            r = subprocess.run([sys.executable, str(ROOT / "tools/quantize_stream.py"), *srcargs, "--out", str(out),
+                                "--device", "cpu", "--clip-grid", "3", "--eval-tokens", "16"],
+                               capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr + r.stdout
+            outs.append(out)
+        for f in sorted(p.name for p in outs[0].glob("*.safetensors")):
+            assert (outs[0] / f).read_bytes() == (outs[1] / f).read_bytes(), f
+    finally:
+        httpd.shutdown()

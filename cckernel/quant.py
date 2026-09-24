@@ -173,24 +173,57 @@ def unpack(p: dict[str, torch.Tensor], bits: int, K: int) -> torch.Tensor:
 
 @dataclass
 class QLinear:
-    """A packed linear layer: y = W x with W [N, K]."""
+    """A packed linear layer: y = W x with W [N, K]. ``t2`` = relative quantization MSE."""
 
     bits: int
     N: int
     K: int
     planes: dict[str, torch.Tensor]
     scales: torch.Tensor  # fp16 [N, K/128]
+    t2: float = float("nan")
 
-    def dequant(self) -> torch.Tensor:
-        return dequant_rtn(unpack(self.planes, self.bits, self.K), self.scales, self.bits)
+    def dequant(self, r0: int = 0, r1: int | None = None) -> torch.Tensor:
+        """Dequantize rows [r0, r1) (all rows by default) to fp32."""
+        r1 = self.N if r1 is None else r1
+        planes = {k: v[r0:r1] for k, v in self.planes.items()}
+        return dequant_rtn(unpack(planes, self.bits, self.K), self.scales[r0:r1], self.bits)
 
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in self.planes.values()) + self.scales.numel() * 2
 
+    def to(self, device) -> "QLinear":
+        return QLinear(self.bits, self.N, self.K, {k: v.to(device) for k, v in self.planes.items()},
+                       self.scales.to(device), self.t2)
+
     @classmethod
-    def from_weight(cls, w: torch.Tensor, bits: int, clip_grid: int = 20) -> "QLinear":
-        u, s = quantize_rtn(w, bits, clip_grid=clip_grid)
-        return cls(bits, w.shape[0], w.shape[1], pack(u, bits), s)
+    def from_weight(cls, w: torch.Tensor, bits: int, clip_grid: int = 20, row_chunk: int = 16384) -> "QLinear":
+        """Quantize + pack in row chunks (rows are independent), so peak memory is bounded by the
+        chunk, not the matrix (the 248320-row lm_head would otherwise need an 8 GB int64 buffer)."""
+        N, K = w.shape
+        planes: dict[str, list[torch.Tensor]] = {}
+        scales = []
+        err = ref = 0.0
+        for r0 in range(0, N, row_chunk):
+            wc = w[r0:r0 + row_chunk].float()
+            u, s = quantize_rtn(wc, bits, clip_grid=clip_grid)
+            for k, v in pack(u, bits).items():
+                planes.setdefault(k, []).append(v)
+            scales.append(s)
+            err += float(((dequant_rtn(u, s, bits) - wc) ** 2).sum())
+            ref += float((wc ** 2).sum())
+            del u, wc
+        return cls(bits, N, K, {k: torch.cat(v) for k, v in planes.items()}, torch.cat(scales), err / max(ref, 1e-30))
+
+    @classmethod
+    def concat(cls, parts: list["QLinear"]) -> "QLinear":
+        """Stack row blocks quantized separately (bit-identical to quantizing the stacked matrix)."""
+        bits, K = parts[0].bits, parts[0].K
+        assert all(p.bits == bits and p.K == K for p in parts)
+        N = sum(p.N for p in parts)
+        wsum = sum(p.N for p in parts if p.t2 == p.t2)
+        t2 = sum(p.t2 * p.N for p in parts if p.t2 == p.t2) / max(wsum, 1)
+        planes = {k: torch.cat([p.planes[k] for p in parts]) for k in parts[0].planes}
+        return cls(bits, N, K, planes, torch.cat([p.scales for p in parts]), t2)
 
     def state(self, prefix: str) -> dict[str, torch.Tensor]:
         d = {f"{prefix}.{k}": v for k, v in self.planes.items()}
@@ -318,13 +351,24 @@ def fold_layer(cfg: TextConfig, i: int, get, signs: torch.Tensor | None, dtype=t
     return out
 
 
+def fold_embed_rows(rows: torch.Tensor, signs: torch.Tensor | None) -> torch.Tensor:
+    """Embedding rows e -> Q e (row-wise, so it can be streamed in row chunks)."""
+    rows = rows if rows.dtype == torch.float64 else rows.float()
+    return hadamard.rotate_reader(rows, signs) if signs is not None else rows
+
+
+def fold_lm_head_rows(rows: torch.Tensor, final_norm_w: torch.Tensor, signs: torch.Tensor | None) -> torch.Tensor:
+    """lm_head rows W diag(1 + g_final) Q^T (row-wise)."""
+    rows = rows if rows.dtype == torch.float64 else rows.float()
+    rows = rows * (1.0 + final_norm_w.to(rows.dtype))[None, :]
+    return hadamard.rotate_reader(rows, signs) if signs is not None else rows
+
+
 def fold_globals(cfg: TextConfig, get, signs: torch.Tensor | None, dtype=torch.float32) -> dict[str, torch.Tensor]:
-    emb = get("embed_tokens.weight").to(dtype)
-    lm = get("lm_head.weight").to(dtype) * (1.0 + get("norm.weight").to(dtype))[None, :]
-    if signs is not None:
-        emb = hadamard.rotate_reader(emb, signs)  # rows e -> Q e  (same op as a reader: E Q^T)
-        lm = hadamard.rotate_reader(lm, signs)
-    return {"embed": emb, "lm_head": lm}
+    """Whole-matrix variant (small models / tests). Large models use the row-chunked functions."""
+    emb = fold_embed_rows(get("embed_tokens.weight").to(dtype), signs)
+    lm = fold_lm_head_rows(get("lm_head.weight").to(dtype), get("norm.weight").to(dtype), signs)
+    return {"embed": emb.to(dtype), "lm_head": lm.to(dtype)}
 
 
 LINEAR_NAMES = ("in_proj", "out_proj", "qkv_proj", "o_proj", "gate_up", "down")
