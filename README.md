@@ -223,7 +223,31 @@ python bench/vs_llamacpp.py --gguf MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf --llama-b
     --model /models/mimo-cck-q8 --ctx 0 8192 32768 --out vs_llamacpp_gpu.json
 ```
 
-<!--MMLU-->
+### MMLU-Pro
+
+The subset is **280 questions**, 20 from each of the 14 categories, with a fixed seed. Script: [`tools/eval_mmlu_pro.py`](tools/eval_mmlu_pro.py); data: [`docs/mmlu_pro.json`](docs/mmlu_pro.json).
+
+The protocol is zero-shot, with no chain of thought:
+- the chat template with thinking off;
+- the assistant turn prefilled with "The answer is (";
+- the prediction is the highest-scoring option letter.
+
+Every backend sees exactly the same prompts. This is cheaper than the official 5-shot CoT protocol, so the absolute scores are lower than published CoT numbers and not comparable to them.
+
+| Model | Accuracy | Same answer as the original | Changes vs original (lost / gained) |
+|---|---|---|---|
+| Original bf16 (weights streamed from the Hub) | **55.4 %** ± 3.0 | — | — |
+| cckernel INT8, bf16 KV | 53.9 % ± 3.0 | **98.2 %** | 4 / 0 |
+| cckernel INT8, fp4 KV | 53.9 % ± 3.0 | 91.1 % | 8 / 4 |
+| llama.cpp Q8_0 (ggml-org GGUF) | 54.3 % ± 3.0 | 95.4 % | 4 / 1 |
+
+**Reading the results:**
+- **Accuracy:** all quantized variants are within 1.5 points of the original, which is inside the ±3.0 sampling error of 280 questions.
+- **INT8 weights:**
+  - They change only 5 of 280 answers, fewer than llama.cpp's Q8_0 (13). The rotation plus MSE clipping keeps closer to the original.
+  - The 4-to-0 split is consistent with a small real loss (exact test p ≈ 0.13).
+- **FP4 KV:** it changes about 9 % of the letter decisions, but the gains and losses cancel. That matches the token-level measurements above: many small shifts and no systematic damage.
+
 
 ## Validation status
 

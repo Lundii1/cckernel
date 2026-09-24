@@ -204,26 +204,42 @@ def run_llamacpp(args, qs, tok) -> dict:
     if args.threads:
         cmd += ["-t", str(args.threads)]
     log("  $ " + " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = f"http://127.0.0.1:{args.port}"
-    t0 = time.time()
-    try:
+
+    def start():
+        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(600):
             try:
                 with urllib.request.urlopen(base + "/health", timeout=2) as r:
                     if json.loads(r.read()).get("status") == "ok":
-                        break
+                        return p
             except Exception:  # noqa: BLE001
+                if p.poll() is not None:
+                    break
                 time.sleep(1)
+        raise RuntimeError("llama-server did not start")
+
+    t0 = time.time()
+    proc = start()
+    try:
         preds = []
         for k, q in enumerate(qs):
             valid = LETTERS[: len(q["options"])]
             body = {"prompt": prompt_text(tok, q), "n_predict": 1, "temperature": 0.0, "cache_prompt": False,
                     "grammar": "root ::= [" + valid + "]"}
-            req = urllib.request.Request(base + "/completion", data=json.dumps(body).encode(),
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=600) as r:
-                preds.append(json.loads(r.read())["content"].strip()[:1])
+            for attempt in range(3):  # restart the server if it went away (e.g. killed under memory pressure)
+                try:
+                    req = urllib.request.Request(base + "/completion", data=json.dumps(body).encode(),
+                                                 headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=600) as r:
+                        preds.append(json.loads(r.read())["content"].strip()[:1])
+                    break
+                except Exception as e:  # noqa: BLE001
+                    log(f"  [llama.cpp] question {k}: {type(e).__name__}; restarting the server")
+                    proc.kill()
+                    proc = start()
+            else:
+                raise RuntimeError(f"question {k} failed 3 times")
             if k % 20 == 19:
                 log(f"  [llama.cpp] {k + 1}/{len(qs)} [{time.time() - t0:.0f}s]")
     finally:
