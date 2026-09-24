@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from . import torch_ops as T
-from .quant import GROUP, dequant_rtn, unpack
+from .quant import dequant_rtn, unpack
 
 RING = 32
 _WCACHE: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}

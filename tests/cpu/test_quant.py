@@ -1,7 +1,5 @@
 """Quantizer, packing layout and kernel-decode emulation."""
 
-import math
-
 import pytest
 import torch
 

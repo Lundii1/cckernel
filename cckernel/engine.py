@@ -115,7 +115,7 @@ class Engine:
     def _alloc_state(self):
         c, d = self.cfg, self.dev
         bf, f32 = torch.bfloat16, torch.float32
-        C, Hv, Hk = c.gdn_conv_dim, c.linear_num_value_heads, c.linear_num_key_heads
+        C, Hv = c.gdn_conv_dim, c.linear_num_value_heads
         self.ring = {i: torch.zeros(C, RING, dtype=bf, device=d) for i in c.gdn_layers}
         self.S = {i: torch.zeros(Hv, 128, 128, dtype=f32, device=d) for i in c.gdn_layers}
         self.pend_u = {i: torch.zeros(MAXM, Hv, 128, dtype=f32, device=d) for i in c.gdn_layers}
@@ -145,7 +145,8 @@ class Engine:
         self.logits = torch.zeros(MAXM, c.vocab_size, dtype=f32, device=d)
         self.inv_freq = T.inv_freq_hf(c.rotary_dim, c.rope_theta, d)
         biggest = max(q.N * q.K for n, q in self.lin.items() if n != "lm_head")
-        self.scratch = torch.empty(biggest, dtype=bf, device=d)
+        # two dequant buffers: a block's input and output projections are resident together
+        self.scratch = [torch.empty(biggest, dtype=bf, device=d), torch.empty(biggest, dtype=bf, device=d)]
 
     def reset(self):
         for t in list(self.ring.values()) + list(self.S.values()):
@@ -275,8 +276,6 @@ class Engine:
     # ------------------------------------------------------------------------------------------
     # prefill (torch + cuBLAS on dequantized weights)
     # ------------------------------------------------------------------------------------------
-    def _lin_prefill(self, name, x):
-        return x @ self.lin[name].dequant(self.scratch).t()
 
     def _commit_torch(self):
         """Apply pending GDN tokens of the last step to S (same math as the kernel)."""
@@ -305,66 +304,105 @@ class Engine:
     def prefill(self, ids: list[int]) -> torch.Tensor:
         """Process prompt tokens (committed). Returns fp32 logits [V] of the last token."""
         self._commit_torch()
-        for s in range(0, len(ids), self.prefill_chunk):
-            self._prefill_chunk(ids[s:s + self.prefill_chunk])
+        self._prefill(ids)
         return self.logits[0]
 
-    def _prefill_chunk(self, ids: list[int]):
+    @torch.no_grad()
+    def score(self, ids: list[int]) -> torch.Tensor:
+        """Log-probabilities [n, V] for every position of a fresh sequence (calibration / ppl)."""
+        self.reset()
+        h = self._prefill(ids, keep_hidden=True)
+        eps = self.cfg.rms_norm_eps
+        xn = (h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
+        out = torch.empty(len(ids), self.cfg.vocab_size, dtype=torch.float32, device=self.dev)
+        for s in range(0, len(ids), MAXM):
+            m = min(MAXM, len(ids) - s)
+            self.xn[:m].copy_(xn[s:s + m])
+            if m == 1:
+                self.lin["lm_head"].gemv(PRO_BF16, self.xn[0], self.logits[0], EPI_F32)
+            else:
+                self.lin["lm_head"].skinny(self.xn, m, self.logits, EPI_F32)
+            out[s:s + m] = torch.log_softmax(self.logits[:m], dim=-1)
+        self.reset()
+        return out
+
+    def _prefill(self, ids: list[int], keep_hidden: bool = False):
+        """Layer-major prefill: every weight matrix is dequantized once per call (not per chunk), then
+        the prompt is streamed through it in sub-chunks of ``prefill_chunk`` tokens (bounded
+        activation memory). GDN state, conv ring and KV cache advance chunk by chunk."""
         c, eps, dev = self.cfg, self.cfg.rms_norm_eps, self.dev
-        n = len(ids)
-        P0 = self.len_host
+        n, P0, CH = len(ids), self.len_host, self.prefill_chunk
         assert P0 + n <= self.max_len
-        pos = torch.arange(P0, P0 + n, device=dev)
         h = self.embed[torch.tensor(ids, device=dev)].float()
-        H, Hkv, D = c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        Hk, Hv, C, Vd, kd = c.linear_num_key_heads, c.linear_num_value_heads, c.gdn_conv_dim, c.gdn_value_dim, c.gdn_key_dim
+        rms = lambda t: (t * torch.rsqrt(t.pow(2).mean(-1, keepdim=True) + eps)).to(torch.bfloat16)  # noqa: E731
         for i, lt in enumerate(c.layer_types):
             p = f"layers.{i}."
-            x = (h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
-            if lt == "linear_attention":
-                proj = self._lin_prefill(p + "in_proj", x)
-                mixed_in, z = proj[:, :C], proj[:, C:C + Vd]
-                b, a = proj[:, C + Vd:C + Vd + Hv].float(), proj[:, C + Vd + Hv:].float()
-                hp = torch.arange(P0 - 3, P0, device=dev)
-                hist = self.ring[i][:, hp & (RING - 1)].t().float() * (hp >= 0).float()[:, None]
-                mixed = T.conv_silu(hist, mixed_in.float(), self.small[p + "conv_w"])
-                keep = min(3, n)
-                slots = torch.arange(P0 + n - keep, P0 + n, device=dev) & (RING - 1)
-                self.ring[i][:, slots] = mixed_in[n - keep:].t()
-                q = mixed[:, :kd].reshape(n, Hk, 128)
-                k = mixed[:, kd:2 * kd].reshape(n, Hk, 128)
-                v = mixed[:, 2 * kd:].reshape(n, Hv, 128)
-                q = (T.l2norm(q) * 128 ** -0.5).repeat_interleave(Hv // Hk, dim=1)
-                k = T.l2norm(k).repeat_interleave(Hv // Hk, dim=1)
-                g = -self.small[p + "A_log"].exp() * F.softplus(a + self.small[p + "dt_bias"])
-                beta = torch.sigmoid(b)
-                o, S_new = T.gdn_chunk(q, k, v, g, beta, self.S[i])
-                self.S[i].copy_(S_new)  # in place: graphs hold the buffer address
-                xo = T.gated_head_norm(o.reshape(n, Vd).to(torch.bfloat16), z, 128, eps)
-                h = h + self._lin_prefill(p + "out_proj", xo).float()
-            else:
-                proj = self._lin_prefill(p + "qkv_proj", x)
-                qg = proj[:, :c.attn_q_dim].reshape(n, H, 2 * D)
-                q, gate = qg[..., :D], qg[..., D:].reshape(n, H * D)
-                k = proj[:, c.attn_q_dim:c.attn_q_dim + Hkv * D].reshape(n, Hkv, D)
-                v = proj[:, c.attn_q_dim + Hkv * D:].reshape(n, Hkv, D)
-                q = T.rope_bf16(T.rms_norm_w(q, self.small[p + "q_norm"], eps), pos, self.inv_freq)
-                k = T.rope_bf16(T.rms_norm_w(k, self.small[p + "k_norm"], eps), pos, self.inv_freq)
-                self.kc[i][:, P0:P0 + n] = k.transpose(0, 1).to(torch.bfloat16)
-                self.vc[i][:, P0:P0 + n] = v.transpose(0, 1)
-                Ls = P0 + n
-                mask = torch.arange(Ls, device=dev)[None, :] <= pos[:, None]
-                o = F.scaled_dot_product_attention(q.transpose(0, 1)[None].to(torch.bfloat16), self.kc[i][None, :, :Ls],
-                                                   self.vc[i][None, :, :Ls], attn_mask=mask, enable_gqa=True)
-                o = o[0].transpose(0, 1).reshape(n, H * D).float()
-                o = (T.bf16r(o) * T.bf16r(torch.sigmoid(gate.float()))).to(torch.bfloat16)
-                h = h + self._lin_prefill(p + "o_proj", o).float()
-            x = (h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
-            gu = self._lin_prefill(p + "gate_up", x)
-            hm = (T.bf16r(F.silu(gu[:, 0::2].float())) * gu[:, 1::2].float()).to(torch.bfloat16)
-            h = h + self._lin_prefill(p + "down", hm).float()
-        self.resid[0].copy_(h[-1])
-        self.lin["lm_head"].gemv(PRO_RMSNORM, self.resid[0], self.logits[0], EPI_F32, eps=eps)
+            names = ("in_proj", "out_proj") if lt == "linear_attention" else ("qkv_proj", "o_proj")
+            W_in = self.lin[p + names[0]].dequant(self.scratch[0])
+            W_out = self.lin[p + names[1]].dequant(self.scratch[1])
+            for s in range(0, n, CH):
+                e = min(n, s + CH)
+                x = rms(h[s:e])
+                if lt == "linear_attention":
+                    mix = self._gdn_prefill(i, x @ W_in.t(), P0 + s)
+                else:
+                    mix = self._attn_prefill(i, x @ W_in.t(), P0 + s)
+                h[s:e] += (mix @ W_out.t()).float()
+            W_gu = self.lin[p + "gate_up"].dequant(self.scratch[0])
+            W_dn = self.lin[p + "down"].dequant(self.scratch[1])
+            for s in range(0, n, CH):
+                e = min(n, s + CH)
+                gu = rms(h[s:e]) @ W_gu.t()
+                hm = (T.bf16r(F.silu(gu[:, 0::2].float())) * gu[:, 1::2].float()).to(torch.bfloat16)
+                h[s:e] += (hm @ W_dn.t()).float()
         self.len_host += n
         self.cur_len.fill_(self.len_host)
         self.n_commit.zero_()
+        if keep_hidden:
+            return h
+        self.resid[0].copy_(h[-1])
+        self.lin["lm_head"].gemv(PRO_RMSNORM, self.resid[0], self.logits[0], EPI_F32, eps=eps)
+        return None
+
+    def _gdn_prefill(self, i: int, proj: torch.Tensor, P0: int) -> torch.Tensor:
+        """GDN mixer for tokens at positions P0..P0+n-1; returns the gated-norm output (bf16)."""
+        c, eps, dev = self.cfg, self.cfg.rms_norm_eps, self.dev
+        p, n = f"layers.{i}.", proj.shape[0]
+        Hk, Hv, C, Vd, kd = c.linear_num_key_heads, c.linear_num_value_heads, c.gdn_conv_dim, c.gdn_value_dim, c.gdn_key_dim
+        mixed_in, z = proj[:, :C], proj[:, C:C + Vd]
+        b, a = proj[:, C + Vd:C + Vd + Hv].float(), proj[:, C + Vd + Hv:].float()
+        hp = torch.arange(P0 - 3, P0, device=dev)
+        hist = self.ring[i][:, hp & (RING - 1)].t().float() * (hp >= 0).float()[:, None]
+        mixed = T.conv_silu(hist, mixed_in.float(), self.small[p + "conv_w"])
+        keep = min(3, n)
+        slots = torch.arange(P0 + n - keep, P0 + n, device=dev) & (RING - 1)
+        self.ring[i][:, slots] = mixed_in[n - keep:].t()
+        rep = Hv // Hk
+        q = (T.l2norm(mixed[:, :kd].reshape(n, Hk, 128)) * 128 ** -0.5).repeat_interleave(rep, dim=1)
+        k = T.l2norm(mixed[:, kd:2 * kd].reshape(n, Hk, 128)).repeat_interleave(rep, dim=1)
+        v = mixed[:, 2 * kd:].reshape(n, Hv, 128)
+        g = -self.small[p + "A_log"].exp() * F.softplus(a + self.small[p + "dt_bias"])
+        o, S_new = T.gdn_chunk(q, k, v, g, torch.sigmoid(b), self.S[i])
+        self.S[i].copy_(S_new)  # in place: graphs hold the buffer address
+        return T.gated_head_norm(o.reshape(n, Vd).to(torch.bfloat16), z, 128, eps)
+
+    def _attn_prefill(self, i: int, proj: torch.Tensor, P0: int) -> torch.Tensor:
+        """Gated attention for tokens at positions P0..P0+n-1 (writes the KV cache); returns bf16."""
+        c, eps, dev = self.cfg, self.cfg.rms_norm_eps, self.dev
+        p, n = f"layers.{i}.", proj.shape[0]
+        H, Hkv, D = c.num_attention_heads, c.num_key_value_heads, c.head_dim
+        pos = torch.arange(P0, P0 + n, device=dev)
+        qg = proj[:, :c.attn_q_dim].reshape(n, H, 2 * D)
+        q, gate = qg[..., :D], qg[..., D:].reshape(n, H * D)
+        k = proj[:, c.attn_q_dim:c.attn_q_dim + Hkv * D].reshape(n, Hkv, D)
+        v = proj[:, c.attn_q_dim + Hkv * D:].reshape(n, Hkv, D)
+        q = T.rope_bf16(T.rms_norm_w(q, self.small[p + "q_norm"], eps), pos, self.inv_freq)
+        k = T.rope_bf16(T.rms_norm_w(k, self.small[p + "k_norm"], eps), pos, self.inv_freq)
+        self.kc[i][:, P0:P0 + n] = k.transpose(0, 1).to(torch.bfloat16)
+        self.vc[i][:, P0:P0 + n] = v.transpose(0, 1)
+        Ls = P0 + n
+        mask = torch.arange(Ls, device=dev)[None, :] <= pos[:, None]
+        o = F.scaled_dot_product_attention(q.transpose(0, 1)[None].to(torch.bfloat16), self.kc[i][None, :, :Ls],
+                                           self.vc[i][None, :, :Ls], attn_mask=mask, enable_gqa=True)
+        o = o[0].transpose(0, 1).reshape(n, H * D).float()
+        return (T.bf16r(o) * T.bf16r(torch.sigmoid(gate.float()))).to(torch.bfloat16)

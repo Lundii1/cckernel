@@ -40,10 +40,15 @@ def prior_alphas(cfg: TextConfig) -> dict[str, float]:
     return out
 
 
-def allocate(items: list[tuple[str, int, dict[int, float], float]], budget_bytes: float, unit_bytes: float = 2 ** 18,
-             min_bits: dict[str, int] | None = None) -> dict[str, int]:
-    """items: (name, numel, {bits: t2}, alpha). Minimise sum alpha*t2 s.t. sum bytes <= budget."""
+def allocate(items: list[tuple[str, int, dict[int, float], float]], budget_bytes: float,
+             unit_bytes: float | None = None, min_bits: dict[str, int] | None = None) -> dict[str, int]:
+    """items: (name, numel, {bits: t2}, alpha). Minimise sum alpha*t2 s.t. sum bytes <= budget.
+
+    Costs are rounded up to ``unit_bytes`` (default: budget / 20000, i.e. a 20k-cell DP), so the
+    returned assignment always satisfies the real budget.
+    """
     min_bits = min_bits or {}
+    unit_bytes = unit_bytes or max(1.0, budget_bytes / 20000)
     B = int(budget_bytes // unit_bytes)
     INF = float("inf")
     dp = np.full(B + 1, INF)
