@@ -73,7 +73,18 @@ python tools/quantize.py --model /models/MiMo-V2.6-Distill-Qwen-9B --out /models
   - The **full engine** runs through a torch emulation of every CUDA op. That covers prefill, decode, speculative verify/rollback (identical to greedy) and multi-turn prefill after decode.
 - **The CUDA sources compile for sm_89** with nvcc 13.0, with no register spills, and the extension links against torch.
 - **Not yet run on a GPU.** `tests/gpu` checks every kernel against its emulation, plus the GPU engine against the CPU engine and optional HF parity (`CCK_HF_MODEL=... CCK_MODEL=... pytest tests/gpu/test_hf_parity.py -s`). The benchmarks also still need a GPU run.
-- The model weights could not be downloaded in the development container, so no quantized checkpoint of the real model has been produced yet.
+- **The real model has been quantized** with `quality` (INT8, rotated, MSE clip), streamed from the Hub. The run took 27.5 min on 4 CPU cores and fetched 16.7 GiB. The full report is [`docs/quality_report_q8.json`](docs/quality_report_q8.json). On 512 eval tokens (256 WikiText-2 + 256 code), measured against the fp32 reference of the original bf16 weights:
+
+  | Metric | Value |
+  |---|---|
+  | Weights / embedding | 7.51 GiB INT8 / 1.89 GiB bf16 |
+  | Per-matrix t² (mean / max) | 4.3e-5 / 5.7e-5 |
+  | KL(p_bf16 ‖ p_int8), mean / max | 8.4e-4 / 4.6e-2 nats |
+  | Top-1 next-token agreement | 98.05 % (10 / 512 tokens differ) |
+  | Perplexity, WikiText-2 | 16.14 → 16.11 |
+  | Perplexity, code | 4.80 → 4.82 |
+  | Perplexity, combined | 8.803 → 8.811 (+0.09 %) |
+  | Residual-stream error after the last layer | 2.2 % (prose), 3.6 % (code) |
 
 ## Layout
 
